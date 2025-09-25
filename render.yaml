@@ -2,6 +2,6 @@ services:
   - type: worker
     name: larp-doordash-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: python --version && pip install -r requirements.txt
     startCommand: python bot.py
     autoDeploy: true
