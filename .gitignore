@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs & runtime files
+logs.txt
+audit.jsonl
+links.json
+
+# Secrets
+.env
+
+# IDE configs
+.vscode/
+.idea/
