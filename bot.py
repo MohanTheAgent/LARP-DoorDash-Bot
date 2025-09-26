@@ -1,28 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-DoorDash LA:RP Bot — FULL (all commands)
-- /link auto-detects user's forum thread (1420780863632965763) — saves to links.json
-- /log_delivery (requires /link first) — posts to Delivery channel (1420773516512460840) AND user's forum thread; styled embed w/ GIF
-- /log_incident — posts to 1420773317949784124, pings unified role
-- /permission_request — posts to 1420811205114859732, small-text ping SHR role
-- /resignation_request — posts to 1420810835508330557
-- /host_deployment — posts to 1420778159879753800 with GIF + vote buttons (no emoji names), pings unified role
-- /promote — posts to 1420819381788741653 (content mentions employee)
-- /infraction — posts to 1420820006530191511 (content mentions employee)
-- Ticket system:
-  * /ticket_embed (panel goes to 1420723037015113749, no user attribution shown)
-  * /ticket_open, /ticket_close, /ticket_close_request, /ticket_blacklist (SHR only)
-  * Tickets per-type categories:
-      GS  -> 1420967576153882655
-      MC  -> 1421019719023984690
-      SHR -> 1421019777807290461
-  * Channel names like gs-ticket-#, mc-ticket-#, shr-ticket-#
-  * Transcripts to 1420970087376093214
-- /suggest — posts to 1421029829096243247, creates discussion thread, up/down/list voters
-- Welcome when role 1420721072197861446 is granted -> 1420784105448280136 (content mentions user)
-- /sync (staff-only role 1420721073170677783, 5 min cooldown)
-- JSON persistence for links, deliveries, tickets, blacklists, counters, audit
-- Non-blocking aiohttp health server for Render (binds $PORT)
+DoorDash LA:RP Bot — FULL (all commands) — PATCH
+- Only role 1420777206770171985 can /host_deployment
+- /log_incident no longer pings anyone (embed only)
+- Ticket close confirmation prompt is NOT ephemeral
 """
 
 import os
@@ -69,11 +50,11 @@ CAT_SHR  = 1421019777807290461
 # --------------------------------------------------------------------------------------
 # IDs (Roles)
 # --------------------------------------------------------------------------------------
-# Unified employee role that can use: /link, /log_delivery, /log_incident, /permission_request, /resignation_request, and is pinged for deployment
+# Unified employee role that can use: /link, /log_delivery, /log_incident, /permission_request, /resignation_request
 ROLE_EMPLOYEE_ALL    = 1420838579780714586
 
-# Deployment command access role (host deployment)
-ROLE_HOST_DEPLOY_CMD = 1420836448692736122
+# Host deployment — ONLY THIS ROLE
+ROLE_HOST_DEPLOY_CMD = 1420777206770171985
 
 # Ticket pings/visibility
 ROLE_TICKET_GS       = 1420721072197861446  # General Support team
@@ -320,7 +301,8 @@ class TicketActionView(ui.View):
         if interaction.user.id not in {t["opener_id"], t.get("handler_id")} and not has_any_role(interaction.user, [role_needed]):
             return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
         view = ConfirmCloseView(t["opener_id"], t.get("handler_id"), t["id"])
-        await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=True)
+        # NOT ephemeral (per request)
+        await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=False)
 
     @ui.button(label="Close w/ Reason", style=discord.ButtonStyle.secondary, custom_id="ticket_close_reason")
     async def close_reason(self, interaction: Interaction, button: ui.Button):
@@ -502,7 +484,8 @@ async def ticket_close(interaction: Interaction):
     if interaction.user.id not in {t["opener_id"], t.get("handler_id")} and not has_any_role(interaction.user, [needed_role]):
         return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
     view = ConfirmCloseView(t["opener_id"], t.get("handler_id"), t["id"])
-    await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=True)
+    # NOT ephemeral (per request)
+    await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=False)
 
 @client.tree.command(guild=GUILD_OBJ, name="ticket_close_request", description="Handler requests close; opener must approve.")
 async def ticket_close_request(interaction: Interaction):
@@ -528,7 +511,6 @@ async def ticket_close_request(interaction: Interaction):
         view.stop()
     view.add_item(ui.Button(label="Approve Close", style=discord.ButtonStyle.success, custom_id="approve_close_req"))
     view.add_item(ui.Button(label="Decline", style=discord.ButtonStyle.secondary, custom_id="decline_close_req"))
-    # wire callbacks
     for child in view.children:
         if isinstance(child, ui.Button) and child.custom_id == "approve_close_req":
             child.callback = approve_cb
@@ -684,7 +666,8 @@ async def log_incident(interaction: Interaction, location: str, incident_type: s
     embed.add_field(name="Type", value=incident_type, inline=False)
     embed.add_field(name="Reason", value=reason, inline=False)
     chan = client.get_channel(CHAN_INCIDENT)
-    await chan.send(f"<@&{ROLE_EMPLOYEE_ALL}>", embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
+    # NO PING — just send the embed
+    await chan.send(embed=embed)
     audit("incident_log", {"by": interaction.user.id, "loc": location})
     await interaction.response.send_message("Incident logged.", ephemeral=True)
 
@@ -715,6 +698,7 @@ async def permission_request(interaction: Interaction, permission: str, reason: 
 
 @client.tree.command(guild=GUILD_OBJ, name="host_deployment", description="Host a deployment")
 async def host_deployment(interaction: Interaction, reason: str, location: str, votes: str):
+    # ONLY role 1420777206770171985
     if not has_any_role(interaction.user, [ROLE_HOST_DEPLOY_CMD]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
     embed = Embed(title="Deployment Hosted", color=discord.Color.purple())
@@ -757,8 +741,7 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
             await inter.response.send_message(embed=emb, ephemeral=True)
 
     chan = client.get_channel(CHAN_DEPLOYMENT)
-    await chan.send(content=f"<@&{ROLE_EMPLOYEE_ALL}>", embed=embed, view=DeployVoteView(),
-                    allowed_mentions=discord.AllowedMentions(roles=True))
+    await chan.send(embed=embed, view=DeployVoteView())
     audit("host_deploy", {"by": interaction.user.id, "reason": reason})
     await interaction.response.send_message("Deployment hosted.", ephemeral=True)
 
