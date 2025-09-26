@@ -58,6 +58,9 @@ ROLE_TICKET_GS  = 1420721072197861446
 ROLE_TICKET_MC  = 1420836510185554074
 ROLE_TICKET_SHR = 1420721073170677783
 
+# Staff role allowed to /sync (and 5-min cooldown)
+STAFF_ROLE_ID = ROLE_TICKET_SHR
+
 # -------------- Files (persistence) --------------
 LINKS_FILE = "links.json"
 DELIVERIES_FILE = "deliveries.json"
@@ -687,6 +690,27 @@ async def infraction(interaction: Interaction, employee: discord.Member, reason:
     audit("infraction", {"by": interaction.user.id, "emp": employee.id, "type": infraction_type})
     await interaction.response.send_message("Infraction logged.", ephemeral=True)
 
+# -------------- /sync (staff-only, 5 min cooldown) --------------
+def _cooldown_key(inter: Interaction):
+    # cooldown per-user
+    return inter.user.id
+
+@client.tree.command(name="sync", description="Force sync slash commands (staff only, 5 min cooldown)")
+@app_commands.check(lambda i: any(r.id == STAFF_ROLE_ID for r in i.user.roles))
+@app_commands.checks.cooldown(1, 300.0, key=_cooldown_key)  # 1 use every 300s per user
+async def sync_cmd(interaction: Interaction):
+    try:
+        if GUILD_OBJ:
+            cmds = await client.tree.sync(guild=GUILD_OBJ)
+        else:
+            cmds = await client.tree.sync()
+        await interaction.response.send_message(f"Synced {len(cmds)} commands.", ephemeral=True)
+    except app_commands.errors.CommandOnCooldown as e:
+        # (This except block won't catch here; cooldown is enforced before callback)
+        await interaction.response.send_message(f"On cooldown: try again in {e.retry_after:.0f}s.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Sync failed: `{e}`", ephemeral=True)
+
 # -------------- Events --------------
 @client.event
 async def on_ready():
@@ -715,23 +739,32 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             await chan.send(content=after.mention, embed=embed)
 
 # -------------- Tiny HTTP server (Render Web Service) --------------
+WEB_RUNNER = None
+WEB_SITE = None
+
 async def _health(request):
     return web.Response(text="ok")
 
 async def start_web_server():
+    """Start and keep an aiohttp server alive on the $PORT Render provides."""
+    global WEB_RUNNER, WEB_SITE
     app = web.Application()
     app.router.add_get("/", _health)
     app.router.add_get("/health", _health)
-    port = int(os.getenv("PORT", "10000"))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"[web] listening on :{port}")
+
+    port_str = os.getenv("PORT") or "10000"
+    port = int(port_str)
+
+    WEB_RUNNER = web.AppRunner(app)
+    await WEB_RUNNER.setup()
+    WEB_SITE = web.TCPSite(WEB_RUNNER, "0.0.0.0", port)
+    await WEB_SITE.start()
+    print(f"[web] listening on :{port} (PORT env: {os.getenv('PORT')})")
 
 # -------------- Main --------------
 async def main():
-    await start_web_server()
+    # Run health server in background so Render sees an open port
+    asyncio.create_task(start_web_server())
     await client.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":

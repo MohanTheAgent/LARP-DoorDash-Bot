@@ -8,5 +8,15 @@
     "opener_id": 882462850222792714,
     "handler_id": null,
     "status": "closed"
+  },
+  {
+    "id": "1420972926387224596",
+    "channel_id": 1420972926387224596,
+    "guild_id": 1420461249757577329,
+    "type": "shr",
+    "number": 1,
+    "opener_id": 882462850222792714,
+    "handler_id": 882462850222792714,
+    "status": "closed"
   }
 ]
