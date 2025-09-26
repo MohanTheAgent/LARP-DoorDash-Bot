@@ -3,7 +3,7 @@
 DoorDash LA:RP Bot — FULL
 - Ticket system with persistent dropdown panel and per-ticket buttons: Claim, Close, Close w/ Reason (+ Close Request with Approve/Decline)
 - Blacklist & unblacklist with log-channel enforcement (adds + revocations) and cache rebuild on startup
-- /link (placeholder) and /unlink (employee-only)
+- /link AUTO-DETECTS user's forum thread in CHAN_FORUM + /unlink
 - Delivery/Incident logging (incident has NO ping), Promotions, Infractions
 - Host Deployment (restricted to ROLE_HOST_DEPLOY_CMD)
 - Customer Service Welcome (manual command -> posts in CHAN_CUSTOMER_SERVICE)
@@ -535,6 +535,46 @@ async def ensure_ticket_panel(guild: discord.Guild):
     await ch.send(embed=embed, view=TicketDropdown())
 
 # --------------------------------------------------------------------------------------
+# Forum thread auto-detect for /link
+# --------------------------------------------------------------------------------------
+async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optional[discord.Thread]:
+    forum = guild.get_channel(CHAN_FORUM)
+    if not forum or not isinstance(forum, discord.ForumChannel):
+        return None
+
+    candidates: List[discord.Thread] = []
+
+    try:
+        for th in forum.threads:
+            if getattr(th, "owner_id", None) == user_id:
+                candidates.append(th)
+    except:
+        pass
+
+    # Try archived APIs available in discord.py 2.x
+    try:
+        async for th, _ in forum.archived_threads(limit=100):
+            if getattr(th, "owner_id", None) == user_id:
+                candidates.append(th)
+    except:
+        try:
+            async for th, _ in forum.public_archived_threads(limit=100):
+                if getattr(th, "owner_id", None) == user_id:
+                    candidates.append(th)
+        except:
+            pass
+
+    if not candidates:
+        return None
+
+    def _key(t: discord.Thread) -> Tuple[int, int]:
+        ts = int(t.created_at.timestamp()) if t.created_at else 0
+        return (ts, t.id)
+
+    candidates.sort(key=_key, reverse=True)
+    return candidates[0]
+
+# --------------------------------------------------------------------------------------
 # Commands — blacklist add/remove, tickets, link/unlink, delivery, incident, deployments, HR, sync, disabled cmds, welcome
 # --------------------------------------------------------------------------------------
 # Blacklist add
@@ -657,15 +697,24 @@ async def ticket_close_request(interaction: Interaction):
         view=CloseRequestView(ticket)
     )
 
-# /link (placeholder) + /unlink
-@client.tree.command(guild=GUILD_OBJ, name="link", description="Link your forum thread (requires employee role).")
+# /link — AUTO-DETECT user's forum thread in CHAN_FORUM
+@client.tree.command(guild=GUILD_OBJ, name="link", description="Auto-link your forum thread from the forum channel.")
 async def link(interaction: Interaction):
     if not has_any_role(interaction.user, [ROLE_EMPLOYEE_ALL]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    thread = await _find_user_forum_thread(interaction.guild, interaction.user.id)
+    if not thread:
+        return await interaction.followup.send("Couldn't find a forum thread you created in the configured forum.", ephemeral=True)
+
     links = load_json(LINKS_FILE, [])
-    if any(l.get("user") == interaction.user.id for l in links):
-        return await interaction.response.send_message("You're already linked.", ephemeral=True)
-    await interaction.response.send_message("No auto-detect here. A lead must add your link to links.json.", ephemeral=True)
+    links = [l for l in links if l.get("user") != interaction.user.id]
+    links.append({"user": interaction.user.id, "forum": CHAN_FORUM, "thread_id": thread.id, "thread_name": thread.name})
+    save_json(LINKS_FILE, links)
+
+    await send_log_embed(interaction.guild, "Linked Forum", f"{interaction.user.mention} linked to **{thread.name}** (`{thread.id}`)")
+    await interaction.followup.send(f"Linked to your forum thread: **{thread.name}** (`{thread.id}`)", ephemeral=True)
 
 @client.tree.command(guild=GUILD_OBJ, name="unlink", description="Unlink your forum thread (employee role only).")
 async def unlink(interaction: Interaction):
@@ -681,18 +730,18 @@ async def unlink(interaction: Interaction):
     await send_log_embed(interaction.guild, "Unlinked Forum", f"{interaction.user.mention} removed their link.")
     await interaction.response.send_message("Your forum link has been removed.", ephemeral=True)
 
-# Delivery logging (requires linked)
+# Delivery logging (requires linked) — ADDS proof argument
 @client.tree.command(guild=GUILD_OBJ, name="log_delivery", description="Log a delivery (requires you to be linked).")
 async def log_delivery(interaction: Interaction,
                        pickup: str, items: str, dropoff: str, tipped: str,
-                       duration: str, customer: str, method: str):
+                       duration: str, customer: str, method: str, proof: str):
     if not has_any_role(interaction.user, [ROLE_EMPLOYEE_ALL]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
 
     links = load_json(LINKS_FILE, [])
     user_link = next((l for l in links if l.get("user") == interaction.user.id), None)
     if not user_link:
-        return await interaction.response.send_message("You must be linked first. Ask a lead to add your link.", ephemeral=True)
+        return await interaction.response.send_message("You must /link first (auto-detects your forum thread).", ephemeral=True)
 
     embed = Embed(title="Delivery Log", color=discord.Color.green())
     embed.set_image(url=DEPLOYMENT_GIF)
@@ -703,6 +752,7 @@ async def log_delivery(interaction: Interaction,
     embed.add_field(name="Duration", value=duration, inline=True)
     embed.add_field(name="Customer", value=customer, inline=True)
     embed.add_field(name="Requested Via", value=method, inline=True)
+    embed.add_field(name="Proof", value=proof, inline=False)
 
     # channel log
     chan = interaction.guild.get_channel(CHAN_DELIVERY)
@@ -722,7 +772,7 @@ async def log_delivery(interaction: Interaction,
     deliveries.append({
         "user": interaction.user.id, "pickup": pickup, "items": items,
         "dropoff": dropoff, "tipped": tipped, "duration": duration,
-        "customer": customer, "method": method, "thread_id": thread_id
+        "customer": customer, "method": method, "proof": proof, "thread_id": thread_id
     })
     save_json(DELIVERIES_FILE, deliveries)
 
