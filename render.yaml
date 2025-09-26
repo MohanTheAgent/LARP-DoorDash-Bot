@@ -1,10 +1,11 @@
 services:
   - type: web
-    name: doordash-bot
+    name: larp-doordash-bot
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.6
+
