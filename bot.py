@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-DoorDash LA:RP Bot — FULL
+DoorDash LA:RP Bot — FULL (per-ticket-type categories)
 - /link auto-detects user's forum thread in channel 1420780863632965763
 - /log_delivery (requires /link first), /log_incident, /permission_request, /resignation_request
 - /host_deployment with GIF and employee ping + voting buttons
@@ -45,9 +45,13 @@ CHAN_DEPLOYMENT = 1420778159879753800
 CHAN_PROMOTE = 1420819381788741653
 CHAN_INFRACT = 1420820006530191511
 CHAN_CUSTOMER_SERVICE = 1420784105448280136   # welcome when they gain role
-TICKET_CATEGORY_ID = 1420967576153882655      # all tickets go here
 TICKET_PANEL_CHANNEL_ID = 1420723037015113749  # panel must post here
 CHAN_TRANSCRIPTS = 1420970087376093214         # transcripts post here
+
+# NEW: Per-type ticket categories
+TICKET_CATEGORY_GS  = 1420967576153882655  # General Support
+TICKET_CATEGORY_MC  = 1421019719023984690  # Misconduct
+TICKET_CATEGORY_SHR = 1421019777807290461  # Senior High Ranking
 
 # Roles
 # ↓ You asked to use this ONE role id for these commands & pings:
@@ -60,7 +64,7 @@ ROLE_DEPLOYMENT_CAN_USE = _EMPLOYEE_ROLE_ALL
 ROLE_DEPLOYMENT_PING = _EMPLOYEE_ROLE_ALL
 ROLE_INCIDENT_ANY = _EMPLOYEE_ROLE_ALL  # used for permission + ping
 
-# Other roles (unchanged from your system)
+# Other roles
 ROLE_CUSTOMER_SERVICE = 1420721072197861446  # auto-welcome trigger when gained
 ROLE_TICKET_GS  = 1420721072197861446
 ROLE_TICKET_MC  = 1420836510185554074
@@ -77,12 +81,12 @@ DEPLOYMENT_GIF = "https://cdn.discordapp.com/attachments/1420749680538816553/142
 # --------------------------------------------------------------------------------------
 # Files (JSON persistence)
 # --------------------------------------------------------------------------------------
-LINKS_FILE = "links.json"             # [{user, forum, thread_id, thread_name}]
-DELIVERIES_FILE = "deliveries.json"   # [delivery entries]
-TICKETS_FILE = "tickets.json"         # [ticket dicts]
-BLACKLIST_FILE = "blacklist.json"     # {user_id: [types]}
+LINKS_FILE = "links.json"              # [{user, forum, thread_id, thread_name}]
+DELIVERIES_FILE = "deliveries.json"    # [delivery entries]
+TICKETS_FILE = "tickets.json"          # [ticket dicts]
+BLACKLIST_FILE = "blacklist.json"      # {user_id: [types]}
 COUNTERS_FILE = "ticket_counters.json" # {"gs":n,"mc":n,"shr":n}
-AUDIT_FILE = "audit.jsonl"            # line-delimited log
+AUDIT_FILE = "audit.jsonl"             # line-delimited log
 
 def load_json(path: str, default):
     try:
@@ -134,7 +138,6 @@ def has_any_role(member: discord.Member, role_ids) -> bool:
     return any(r.id in ids for r in member.roles)
 
 def incident_ping_role_id():
-    # allow int or list config
     return ROLE_INCIDENT_ANY[-1] if isinstance(ROLE_INCIDENT_ANY, (list, tuple)) else ROLE_INCIDENT_ANY
 
 def ticket_type_meta(ttype: str) -> Dict[str, Any]:
@@ -145,21 +148,24 @@ def ticket_type_meta(ttype: str) -> Dict[str, Any]:
             "ping_role": ROLE_TICKET_GS,
             "bio": ("General Support for any questions you may have regarding anything DoorDash related. "
                     "Our Support Team will be with you as soon as they can."),
-            "visibility_role": None
+            "visibility_role": None,
+            "category_id": TICKET_CATEGORY_GS,
         }
     if t == "mc":
         return {
             "label": "Misconduct",
             "ping_role": ROLE_TICKET_MC,
             "bio": "Misconduct ticket for reporting misconduct or issues regarding your food delivery.",
-            "visibility_role": None
+            "visibility_role": None,
+            "category_id": TICKET_CATEGORY_MC,
         }
     if t == "shr":
         return {
             "label": "Senior High Ranking",
             "ping_role": ROLE_TICKET_SHR,
             "bio": "Used to report customer support members, high ranking questions, or reporting NSFW.",
-            "visibility_role": ROLE_TICKET_SHR
+            "visibility_role": ROLE_TICKET_SHR,
+            "category_id": TICKET_CATEGORY_SHR,
         }
     raise ValueError("Unknown ticket type")
 
@@ -377,9 +383,9 @@ async def create_ticket_channel(
     subject: Optional[str] = None,
 ) -> discord.TextChannel:
     meta = ticket_type_meta(ttype)
-    category = guild.get_channel(TICKET_CATEGORY_ID)
+    category = guild.get_channel(meta["category_id"])
     if not isinstance(category, discord.CategoryChannel):
-        raise RuntimeError("Ticket category ID is not a valid CategoryChannel.")
+        raise RuntimeError("Configured ticket category ID is not a valid CategoryChannel.")
 
     num = next_ticket_number(ttype)
     name = f"{ttype}-ticket-{num}"
@@ -560,13 +566,11 @@ async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optiona
         pass
 
     # archived threads
-    # discord.py exposes .archived_threads; we'll try public archived
     try:
         async for th, _ in forum.archived_threads(limit=100):
             if getattr(th, "owner_id", None) == user_id:
                 candidates.append(th)
     except Exception:
-        # some versions use .public_archived_threads()
         try:
             async for th, _ in forum.public_archived_threads(limit=100):
                 if getattr(th, "owner_id", None) == user_id:
@@ -577,7 +581,7 @@ async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optiona
     if not candidates:
         return None
 
-    # pick newest by created_at (fallback to id)
+    # newest by created_at (fallback to id)
     def _key(t: discord.Thread) -> Tuple[int, int]:
         ts = int(t.created_at.timestamp()) if t.created_at else 0
         return (ts, t.id)
