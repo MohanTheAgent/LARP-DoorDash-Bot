@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
 """
 DoorDash LA:RP Bot — FULL
-- Slash commands for incidents, deliveries, permissions, resignations
-- Promotions and infractions with pings
-- Host deployment with voting buttons + GIF
-- Ticket system with dropdown panel, numbered channels, claim/close/close-with-reason, SHR visibility, transcripts
+- /link auto-detects user's forum thread in channel 1420780863632965763
+- /log_delivery (requires /link first), /log_incident, /permission_request, /resignation_request
+- /host_deployment with GIF and employee ping + voting buttons
+- /promote, /infraction
+- Ticket system: /ticket_embed, /ticket_open, /ticket_close, /ticket_close_request, /ticket_blacklist
+- Transcripts saved to 1420970087376093214
 - /sync (staff-only, 5-min cooldown)
-- JSON persistence
-- Non-blocking aiohttp health server for Render Web Service (binds $PORT)
+- JSON persistence (auto-created)
+- Non-blocking aiohttp health server (binds $PORT for Render)
 """
 
 import os
 import io
 import json
 import asyncio
-from typing import Optional, Literal, Dict, Any
+from typing import Optional, Literal, Dict, Any, List, Tuple
 
 import discord
 from discord import app_commands, Interaction, Embed, ui
@@ -36,7 +38,7 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 # Channels
 CHAN_INCIDENT = 1420773317949784124
 CHAN_DELIVERY = 1420773516512460840
-CHAN_FORUM = 1420780863632965763  # (not directly posted to by bot; link id stored)
+CHAN_FORUM = 1420780863632965763   # forum channel to auto-find user's thread
 CHAN_RESIGNATION = 1420810835508330557
 CHAN_PERMISSION = 1420811205114859732
 CHAN_DEPLOYMENT = 1420778159879753800
@@ -48,21 +50,23 @@ TICKET_PANEL_CHANNEL_ID = 1420723037015113749  # panel must post here
 CHAN_TRANSCRIPTS = 1420970087376093214         # transcripts post here
 
 # Roles
-ROLE_LINK = 1420838579780714586
-ROLE_DELIVERY = 1420838579780714586
-ROLE_INCIDENT_ANY = 1420838579780714586
-ROLE_RESIGNATION = 1420838579780714586
-ROLE_PERMISSION = 1420838579780714586
-ROLE_DEPLOYMENT_CAN_USE = 1420836448692736122
-ROLE_DEPLOYMENT_PING = 1420838579780714586
-ROLE_PROMOTE = 1420836510185554074
-ROLE_INFRACT = 1420836510185554074
-ROLE_CUSTOMER_SERVICE = 1420721072197861446  # auto-welcome trigger
+# ↓ You asked to use this ONE role id for these commands & pings:
+_EMPLOYEE_ROLE_ALL = 1420838579780714586
+ROLE_LINK = _EMPLOYEE_ROLE_ALL
+ROLE_DELIVERY = _EMPLOYEE_ROLE_ALL
+ROLE_RESIGNATION = _EMPLOYEE_ROLE_ALL
+ROLE_PERMISSION = _EMPLOYEE_ROLE_ALL
+ROLE_DEPLOYMENT_CAN_USE = _EMPLOYEE_ROLE_ALL
+ROLE_DEPLOYMENT_PING = _EMPLOYEE_ROLE_ALL
+ROLE_INCIDENT_ANY = _EMPLOYEE_ROLE_ALL  # used for permission + ping
 
-# Ticket ping/visibility roles
+# Other roles (unchanged from your system)
+ROLE_CUSTOMER_SERVICE = 1420721072197861446  # auto-welcome trigger when gained
 ROLE_TICKET_GS  = 1420721072197861446
 ROLE_TICKET_MC  = 1420836510185554074
-ROLE_TICKET_SHR = 1420721073170677783
+ROLE_TICKET_SHR = 1420721073170677783  # senior/high-ranking staff
+ROLE_PROMOTE = 1420836510185554074
+ROLE_INFRACT = 1420836510185554074
 
 # Staff for /sync cooldown
 STAFF_ROLE_ID = ROLE_TICKET_SHR
@@ -73,7 +77,7 @@ DEPLOYMENT_GIF = "https://cdn.discordapp.com/attachments/1420749680538816553/142
 # --------------------------------------------------------------------------------------
 # Files (JSON persistence)
 # --------------------------------------------------------------------------------------
-LINKS_FILE = "links.json"             # [{user, forum}]
+LINKS_FILE = "links.json"             # [{user, forum, thread_id, thread_name}]
 DELIVERIES_FILE = "deliveries.json"   # [delivery entries]
 TICKETS_FILE = "tickets.json"         # [ticket dicts]
 BLACKLIST_FILE = "blacklist.json"     # {user_id: [types]}
@@ -128,6 +132,10 @@ GUILD_OBJ = discord.Object(id=GUILD_ID) if GUILD_ID else None
 def has_any_role(member: discord.Member, role_ids) -> bool:
     ids = set(role_ids if isinstance(role_ids, (list, tuple, set)) else [role_ids])
     return any(r.id in ids for r in member.roles)
+
+def incident_ping_role_id():
+    # allow int or list config
+    return ROLE_INCIDENT_ANY[-1] if isinstance(ROLE_INCIDENT_ANY, (list, tuple)) else ROLE_INCIDENT_ANY
 
 def ticket_type_meta(ttype: str) -> Dict[str, Any]:
     t = ttype.lower()
@@ -186,14 +194,14 @@ def add_ticket(ticket: dict):
     tickets.append(ticket)
     save_json(TICKETS_FILE, tickets)
 
-def blacklist_add(user_id: int, types: list[str]):
+def blacklist_add(user_id: int, types: List[str]):
     bl = load_json(BLACKLIST_FILE, {})
     cur = set(bl.get(str(user_id), []))
     cur |= {t.lower() for t in types}
     bl[str(user_id)] = sorted(cur)
     save_json(BLACKLIST_FILE, bl)
 
-def blacklist_remove(user_id: int, types: list[str]):
+def blacklist_remove(user_id: int, types: List[str]):
     bl = load_json(BLACKLIST_FILE, {})
     cur = set(bl.get(str(user_id), []))
     cur -= {t.lower() for t in types}
@@ -423,7 +431,6 @@ async def create_ticket_channel(
 # --------------------------------------------------------------------------------------
 @client.tree.command(guild=GUILD_OBJ, name="ticket_embed", description="Post the ticket dropdown panel (staff only).")
 async def ticket_embed(interaction: Interaction):
-    # Only SHR staff can post the panel
     if not has_any_role(interaction.user, [ROLE_TICKET_SHR]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
 
@@ -460,7 +467,6 @@ async def ticket_embed(interaction: Interaction):
             super().__init__(timeout=None)
             self.add_item(TicketSelect())
 
-    # Always post the panel in the specified channel
     panel_channel = interaction.guild.get_channel(TICKET_PANEL_CHANNEL_ID)
     if not panel_channel or not isinstance(panel_channel, discord.TextChannel):
         return await interaction.response.send_message("Configured ticket panel channel not found.", ephemeral=True)
@@ -535,19 +541,72 @@ async def ticket_blacklist(interaction: Interaction, user: discord.Member, actio
         return await interaction.response.send_message(f"Removed blacklist for {user.mention} on: {', '.join(tlist)}.", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
-# Other commands you requested
+# /link — auto-find forum thread created by user in channel 1420780863632965763
 # --------------------------------------------------------------------------------------
-@client.tree.command(guild=GUILD_OBJ, name="link", description="Link your personal forum thread (auto-saves).")
-async def link(interaction: Interaction, forum_id: str):
+async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optional[discord.Thread]:
+    """Find newest thread in the forum channel created by this user."""
+    forum = guild.get_channel(CHAN_FORUM)
+    if not forum or not isinstance(forum, discord.ForumChannel):
+        return None
+
+    candidates: List[discord.Thread] = []
+
+    # active threads visible via forum.threads
+    try:
+        for th in forum.threads:
+            if getattr(th, "owner_id", None) == user_id:
+                candidates.append(th)
+    except Exception:
+        pass
+
+    # archived threads
+    # discord.py exposes .archived_threads; we'll try public archived
+    try:
+        async for th, _ in forum.archived_threads(limit=100):
+            if getattr(th, "owner_id", None) == user_id:
+                candidates.append(th)
+    except Exception:
+        # some versions use .public_archived_threads()
+        try:
+            async for th, _ in forum.public_archived_threads(limit=100):
+                if getattr(th, "owner_id", None) == user_id:
+                    candidates.append(th)
+        except Exception:
+            pass
+
+    if not candidates:
+        return None
+
+    # pick newest by created_at (fallback to id)
+    def _key(t: discord.Thread) -> Tuple[int, int]:
+        ts = int(t.created_at.timestamp()) if t.created_at else 0
+        return (ts, t.id)
+
+    candidates.sort(key=_key, reverse=True)
+    return candidates[0]
+
+@client.tree.command(guild=GUILD_OBJ, name="link", description="Link your own forum thread automatically (no ID needed).")
+async def link(interaction: Interaction):
     if not has_any_role(interaction.user, [ROLE_LINK]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+    thread = await _find_user_forum_thread(interaction.guild, interaction.user.id)
+    if not thread:
+        return await interaction.followup.send("Could not find a forum thread you created in the configured forum.", ephemeral=True)
+
     links = load_json(LINKS_FILE, [])
     links = [l for l in links if l.get("user") != interaction.user.id]
-    links.append({"user": interaction.user.id, "forum": forum_id})
+    links.append({"user": interaction.user.id, "forum": CHAN_FORUM, "thread_id": thread.id, "thread_name": thread.name})
     save_json(LINKS_FILE, links)
-    audit("link_set", {"user": interaction.user.id, "forum": forum_id})
-    await interaction.response.send_message(f"Linked forum `{forum_id}`.", ephemeral=True)
+    audit("link_set", {"user": interaction.user.id, "thread_id": thread.id})
 
+    await interaction.followup.send(f"Linked to your forum thread: **{thread.name}** (`{thread.id}`)", ephemeral=True)
+
+# --------------------------------------------------------------------------------------
+# Delivery / Incident / Resignation / Permission / Deployment
+# (all permission checks & pings use role id 1420838579780714586)
+# --------------------------------------------------------------------------------------
 @client.tree.command(guild=GUILD_OBJ, name="log_delivery", description="Log a delivery (requires /link first)")
 async def log_delivery(interaction: Interaction,
                        pickup: str,
@@ -562,7 +621,8 @@ async def log_delivery(interaction: Interaction,
     links = load_json(LINKS_FILE, [])
     user_link = next((l for l in links if l["user"] == interaction.user.id), None)
     if not user_link:
-        return await interaction.response.send_message("You must use /link first to attach your forum.", ephemeral=True)
+        return await interaction.response.send_message("You must use /link first to attach your forum thread.", ephemeral=True)
+
     embed = Embed(title="Delivery Log", color=discord.Color.green())
     embed.add_field(name="Pickup", value=pickup, inline=True)
     embed.add_field(name="Items", value=items, inline=True)
@@ -573,11 +633,12 @@ async def log_delivery(interaction: Interaction,
     embed.add_field(name="Requested Via", value=method, inline=True)
     chan = client.get_channel(CHAN_DELIVERY)
     await chan.send(embed=embed)
+
     deliveries = load_json(DELIVERIES_FILE, [])
     deliveries.append({
         "user": interaction.user.id, "pickup": pickup, "items": items,
         "dropoff": dropoff, "tipped": tipped, "duration": duration,
-        "customer": customer, "method": method
+        "customer": customer, "method": method, "thread_id": user_link.get("thread_id")
     })
     save_json(DELIVERIES_FILE, deliveries)
     audit("delivery_log", {"by": interaction.user.id, "data": deliveries[-1]})
@@ -585,15 +646,14 @@ async def log_delivery(interaction: Interaction,
 
 @client.tree.command(guild=GUILD_OBJ, name="log_incident", description="Log an incident")
 async def log_incident(interaction: Interaction, location: str, incident_type: str, reason: str):
-    if not has_any_role(interaction.user, ROLE_INCIDENT_ANY):
+    if not has_any_role(interaction.user, [ROLE_INCIDENT_ANY]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
     embed = Embed(title="Incident Log", color=discord.Color.red())
     embed.add_field(name="Location", value=location, inline=False)
     embed.add_field(name="Type", value=incident_type, inline=False)
     embed.add_field(name="Reason", value=reason, inline=False)
     chan = client.get_channel(CHAN_INCIDENT)
-    # Ping the last role in list as requested
-    await chan.send(f"<@&{ROLE_INCIDENT_ANY[-1]}>", embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
+    await chan.send(f"<@&{incident_ping_role_id()}>", embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
     audit("incident_log", {"by": interaction.user.id, "loc": location})
     await interaction.response.send_message("Incident logged.", ephemeral=True)
 
@@ -671,6 +731,9 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
     audit("host_deploy", {"by": interaction.user.id, "reason": reason})
     await interaction.response.send_message("Deployment hosted.", ephemeral=True)
 
+# --------------------------------------------------------------------------------------
+# Promotions / Infractions
+# --------------------------------------------------------------------------------------
 @client.tree.command(guild=GUILD_OBJ, name="promote", description="Promote an employee")
 async def promote(interaction: Interaction, employee: discord.Member, old_rank: str, new_rank: str, reason: str, notes: str):
     if not has_any_role(interaction.user, [ROLE_PROMOTE]):
@@ -730,7 +793,7 @@ async def sync_cmd(interaction: Interaction):
         await interaction.response.send_message(f"Sync failed: `{e}`", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
-# Events
+# Events (ready, role gain welcome)
 # --------------------------------------------------------------------------------------
 @client.event
 async def on_ready():
@@ -787,8 +850,7 @@ async def start_web_server():
 # Main
 # --------------------------------------------------------------------------------------
 async def main():
-    # Run health server in background so Render sees an open port
-    asyncio.create_task(start_web_server())
+    asyncio.create_task(start_web_server())  # background task; no event loop conflict
     await client.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
