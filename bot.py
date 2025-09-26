@@ -2,12 +2,12 @@
 """
 DoorDash LA:RP Bot — FULL
 - /link auto-detects user's forum thread in channel 1420780863632965763
-- /log_delivery (requires /link first), /log_incident, /permission_request, /resignation_request
+- /log_delivery (requires /link first) — posts to channel AND user’s forum thread
+- /log_incident, /permission_request, /resignation_request
 - /host_deployment with GIF and employee ping + voting buttons
 - /promote, /infraction
 - Ticket system: /ticket_embed, /ticket_open, /ticket_close, /ticket_close_request, /ticket_blacklist
 - Transcripts saved to 1420970087376093214
-- /suggest with up/down votes + voter list + auto thread
 - /sync (staff-only, 5-min cooldown)
 - JSON persistence (auto-created)
 - Non-blocking aiohttp health server (binds $PORT for Render)
@@ -46,13 +46,9 @@ CHAN_DEPLOYMENT = 1420778159879753800
 CHAN_PROMOTE = 1420819381788741653
 CHAN_INFRACT = 1420820006530191511
 CHAN_CUSTOMER_SERVICE = 1420784105448280136   # welcome when they gain role
-TICKET_CATEGORY_ID = 1420967576153882655      # default ticket category (GS)
-TICKET_CATEGORY_MC_ID = 1421019719023984690   # MC ticket category
-TICKET_CATEGORY_SHR_ID = 1421019777807290461  # SHR ticket category
+TICKET_CATEGORY_ID = 1420967576153882655      # default tickets category
 TICKET_PANEL_CHANNEL_ID = 1420723037015113749  # panel must post here
 CHAN_TRANSCRIPTS = 1420970087376093214         # transcripts post here
-# Suggestions
-CHAN_SUGGEST = 1421029829096243247
 
 # Roles
 # ↓ You asked to use this ONE role id for these commands & pings:
@@ -73,9 +69,6 @@ ROLE_TICKET_SHR = 1420721073170677783  # senior/high-ranking staff
 ROLE_PROMOTE = 1420836510185554074
 ROLE_INFRACT = 1420836510185554074
 
-# Suggestions role
-ROLE_SUGGEST = 1420757573270769725  # only this role can use /suggest
-
 # Staff for /sync cooldown
 STAFF_ROLE_ID = ROLE_TICKET_SHR
 
@@ -85,12 +78,12 @@ DEPLOYMENT_GIF = "https://cdn.discordapp.com/attachments/1420749680538816553/142
 # --------------------------------------------------------------------------------------
 # Files (JSON persistence)
 # --------------------------------------------------------------------------------------
-LINKS_FILE = "links.json"             # [{user, forum, thread_id, thread_name}]
-DELIVERIES_FILE = "deliveries.json"   # [delivery entries]
-TICKETS_FILE = "tickets.json"         # [ticket dicts]
-BLACKLIST_FILE = "blacklist.json"     # {user_id: [types]}
+LINKS_FILE = "links.json"              # [{user, forum, thread_id, thread_name}]
+DELIVERIES_FILE = "deliveries.json"    # [delivery entries]
+TICKETS_FILE = "tickets.json"          # [ticket dicts]
+BLACKLIST_FILE = "blacklist.json"      # {user_id: [types]}
 COUNTERS_FILE = "ticket_counters.json" # {"gs":n,"mc":n,"shr":n}
-AUDIT_FILE = "audit.jsonl"            # line-delimited log
+AUDIT_FILE = "audit.jsonl"             # line-delimited log
 
 def load_json(path: str, default):
     try:
@@ -142,7 +135,6 @@ def has_any_role(member: discord.Member, role_ids) -> bool:
     return any(r.id in ids for r in member.roles)
 
 def incident_ping_role_id():
-    # allow int or list config
     return ROLE_INCIDENT_ANY[-1] if isinstance(ROLE_INCIDENT_ANY, (list, tuple)) else ROLE_INCIDENT_ANY
 
 def ticket_type_meta(ttype: str) -> Dict[str, Any]:
@@ -153,24 +145,21 @@ def ticket_type_meta(ttype: str) -> Dict[str, Any]:
             "ping_role": ROLE_TICKET_GS,
             "bio": ("General Support for any questions you may have regarding anything DoorDash related. "
                     "Our Support Team will be with you as soon as they can."),
-            "visibility_role": None,
-            "category_id": TICKET_CATEGORY_ID,
+            "visibility_role": None
         }
     if t == "mc":
         return {
             "label": "Misconduct",
             "ping_role": ROLE_TICKET_MC,
             "bio": "Misconduct ticket for reporting misconduct or issues regarding your food delivery.",
-            "visibility_role": None,
-            "category_id": TICKET_CATEGORY_MC_ID,
+            "visibility_role": None
         }
     if t == "shr":
         return {
             "label": "Senior High Ranking",
             "ping_role": ROLE_TICKET_SHR,
             "bio": "Used to report customer support members, high ranking questions, or reporting NSFW.",
-            "visibility_role": ROLE_TICKET_SHR,
-            "category_id": TICKET_CATEGORY_SHR_ID,
+            "visibility_role": ROLE_TICKET_SHR
         }
     raise ValueError("Unknown ticket type")
 
@@ -388,13 +377,12 @@ async def create_ticket_channel(
     subject: Optional[str] = None,
 ) -> discord.TextChannel:
     meta = ticket_type_meta(ttype)
-    category = guild.get_channel(meta["category_id"])
+    category = guild.get_channel(TICKET_CATEGORY_ID)
     if not isinstance(category, discord.CategoryChannel):
-        raise RuntimeError("Configured ticket category ID is not a valid CategoryChannel.")
+        raise RuntimeError("Ticket category ID is not a valid CategoryChannel.")
 
     num = next_ticket_number(ttype)
-    prefix = {"gs": "gs", "mc": "mc", "shr": "shr"}[ttype]
-    name = f"{prefix}-ticket-{num}"
+    name = f"{ttype}-ticket-{num}"
 
     everyone = guild.default_role
     overwrites = {
@@ -446,6 +434,11 @@ async def ticket_embed(interaction: Interaction):
     if not has_any_role(interaction.user, [ROLE_TICKET_SHR]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
 
+    # Must post in the configured panel channel
+    panel_channel = interaction.guild.get_channel(TICKET_PANEL_CHANNEL_ID)
+    if not panel_channel or not isinstance(panel_channel, discord.TextChannel):
+        return await interaction.response.send_message("Configured ticket panel channel not found.", ephemeral=True)
+
     embed = Embed(
         title="DoorDash Support Tickets",
         description=(
@@ -478,10 +471,6 @@ async def ticket_embed(interaction: Interaction):
         def __init__(self):
             super().__init__(timeout=None)
             self.add_item(TicketSelect())
-
-    panel_channel = interaction.guild.get_channel(TICKET_PANEL_CHANNEL_ID)
-    if not panel_channel or not isinstance(panel_channel, discord.TextChannel):
-        return await interaction.response.send_message("Configured ticket panel channel not found.", ephemeral=True)
 
     await panel_channel.send(embed=embed, view=TicketDropdownView())
     await interaction.response.send_message("Ticket panel posted.", ephemeral=True)
@@ -571,7 +560,7 @@ async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optiona
     except Exception:
         pass
 
-    # archived threads (public)
+    # archived threads
     try:
         async for th, _ in forum.archived_threads(limit=100):
             if getattr(th, "owner_id", None) == user_id:
@@ -587,7 +576,6 @@ async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optiona
     if not candidates:
         return None
 
-    # pick newest by created_at (fallback to id)
     def _key(t: discord.Thread) -> Tuple[int, int]:
         ts = int(t.created_at.timestamp()) if t.created_at else 0
         return (ts, t.id)
@@ -628,11 +616,14 @@ async def log_delivery(interaction: Interaction,
                        method: str):
     if not has_any_role(interaction.user, [ROLE_DELIVERY]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
+
+    # Must have linked forum thread first
     links = load_json(LINKS_FILE, [])
-    user_link = next((l for l in links if l["user"] == interaction.user.id), None)
-    if not user_link:
+    user_link = next((l for l in links if l.get("user") == interaction.user.id), None)
+    if not user_link or not user_link.get("thread_id"):
         return await interaction.response.send_message("You must use /link first to attach your forum thread.", ephemeral=True)
 
+    # Build the embed once
     embed = Embed(title="Delivery Log", color=discord.Color.green())
     embed.add_field(name="Pickup", value=pickup, inline=True)
     embed.add_field(name="Items", value=items, inline=True)
@@ -641,18 +632,54 @@ async def log_delivery(interaction: Interaction,
     embed.add_field(name="Duration", value=duration, inline=True)
     embed.add_field(name="Customer", value=customer, inline=True)
     embed.add_field(name="Requested Via", value=method, inline=True)
-    chan = client.get_channel(CHAN_DELIVERY)
-    await chan.send(embed=embed)
 
+    # 1) Send to the central delivery channel
+    chan = client.get_channel(CHAN_DELIVERY)
+    if isinstance(chan, (discord.TextChannel, discord.Thread)):
+        await chan.send(embed=embed)
+
+    # 2) Send to the user's linked forum THREAD
+    thread_id = int(user_link["thread_id"])
+    thread = interaction.guild.get_thread(thread_id) if hasattr(interaction.guild, "get_thread") else None
+    if thread is None:
+        thread = client.get_channel(thread_id)  # also works for threads
+
+    posted_to_thread = False
+    if isinstance(thread, discord.Thread):
+        try:
+            if thread.archived:
+                await thread.edit(archived=False, locked=False, reason="Auto-unarchive to log delivery")
+            await thread.send(embed=embed)
+            posted_to_thread = True
+        except Exception:
+            posted_to_thread = False
+
+    # Persist the entry (and whether it hit the thread)
     deliveries = load_json(DELIVERIES_FILE, [])
     deliveries.append({
-        "user": interaction.user.id, "pickup": pickup, "items": items,
-        "dropoff": dropoff, "tipped": tipped, "duration": duration,
-        "customer": customer, "method": method, "thread_id": user_link.get("thread_id")
+        "user": interaction.user.id,
+        "pickup": pickup,
+        "items": items,
+        "dropoff": dropoff,
+        "tipped": tipped,
+        "duration": duration,
+        "customer": customer,
+        "method": method,
+        "thread_id": user_link.get("thread_id"),
+        "posted_to_thread": posted_to_thread,
+        "ts": datetime.now(timezone.utc).isoformat()
     })
     save_json(DELIVERIES_FILE, deliveries)
     audit("delivery_log", {"by": interaction.user.id, "data": deliveries[-1]})
-    await interaction.response.send_message("Delivery logged.", ephemeral=True)
+
+    # Final response
+    if posted_to_thread:
+        await interaction.response.send_message("Delivery logged in channel **and** your forum thread.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            "Delivery logged in the channel. Couldn’t post to your forum thread (not found or no access). "
+            "Try re-running **/link**.", ephemeral=True
+        )
 
 @client.tree.command(guild=GUILD_OBJ, name="log_incident", description="Log an incident")
 async def log_incident(interaction: Interaction, location: str, incident_type: str, reason: str):
@@ -740,69 +767,6 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
                     allowed_mentions=discord.AllowedMentions(roles=True))
     audit("host_deploy", {"by": interaction.user.id, "reason": reason})
     await interaction.response.send_message("Deployment hosted.", ephemeral=True)
-
-# --------------------------------------------------------------------------------------
-# /suggest — suggestions with votes + voter list + auto thread
-# --------------------------------------------------------------------------------------
-@client.tree.command(guild=GUILD_OBJ, name="suggest", description="Create a suggestion with voting and a discussion thread.")
-async def suggest(interaction: Interaction, suggestion: str, details: str):
-    # Permission: only ROLE_SUGGEST users can use it
-    if not has_any_role(interaction.user, [ROLE_SUGGEST]):
-        return await interaction.response.send_message("No permission to use /suggest.", ephemeral=True)
-
-    # Build the suggestion embed
-    embed = Embed(title="New Suggestion", color=discord.Color.dark_teal(), timestamp=datetime.now(timezone.utc))
-    embed.add_field(name="Suggestion", value=suggestion, inline=False)
-    embed.add_field(name="Details", value=details, inline=False)
-    embed.set_footer(text=f"Proposed by {interaction.user} • ID {interaction.user.id}")
-
-    # A voting view similar to deployment, but dedicated to suggestions
-    class SuggestVoteView(ui.View):
-        def __init__(self, author_id: int):
-            super().__init__(timeout=None)
-            self.author_id = author_id
-            self.upvoters = set()
-            self.downvoters = set()
-
-        @ui.button(label="Upvote", style=discord.ButtonStyle.success, custom_id="sug_up")
-        async def up(self, inter: Interaction, b: ui.Button):
-            # allow anyone to vote; if you want to limit, add role checks here
-            self.downvoters.discard(inter.user.id)
-            self.upvoters.add(inter.user.id)
-            await inter.response.send_message("Upvoted.", ephemeral=True)
-
-        @ui.button(label="Downvote", style=discord.ButtonStyle.danger, custom_id="sug_down")
-        async def down(self, inter: Interaction, b: ui.Button):
-            self.upvoters.discard(inter.user.id)
-            self.downvoters.add(inter.user.id)
-            await inter.response.send_message("Downvoted.", ephemeral=True)
-
-        @ui.button(label="List Voters", style=discord.ButtonStyle.secondary, custom_id="sug_list")
-        async def lst(self, inter: Interaction, b: ui.Button):
-            up_list = ", ".join(f"<@{i}>" for i in self.upvoters) or "None"
-            down_list = ", ".join(f"<@{i}>" for i in self.downvoters) or "None"
-            emb = Embed(title="Suggestion Votes", color=discord.Color.blurple())
-            emb.add_field(name="Upvotes", value=up_list, inline=False)
-            emb.add_field(name="Downvotes", value=down_list, inline=False)
-            await inter.response.send_message(embed=emb, ephemeral=True)
-
-    # Send into the suggestions channel and create a thread to discuss
-    channel = client.get_channel(CHAN_SUGGEST)
-    if not channel or not isinstance(channel, discord.TextChannel):
-        return await interaction.response.send_message("Suggestions channel is not configured correctly.", ephemeral=True)
-
-    msg = await channel.send(embed=embed, view=SuggestVoteView(author_id=interaction.user.id))
-    # Create attached thread for discussion
-    thread_name = f"suggestion-{msg.id}"
-    try:
-        thread = await msg.create_thread(name=thread_name, auto_archive_duration=1440)  # 24h archive window
-        await thread.send(f"Discussion thread for this suggestion started by {interaction.user.mention}.")
-    except Exception:
-        # If creating thread fails, continue without throwing
-        pass
-
-    audit("suggest_create", {"by": interaction.user.id, "message_id": msg.id, "suggestion": suggestion})
-    await interaction.response.send_message("Suggestion posted with voting and a discussion thread.", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
 # Promotions / Infractions
