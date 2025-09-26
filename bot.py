@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 DoorDash LA:RP Bot — FULL
-This build adds:
-- ✅ /ticket_unblacklist and /driver_unblacklist (staff-only) to revoke blacklists.
-- 🧾 Revocations reply to the original blacklist log message in BLACKLIST_LOG_CH with a "Blacklist Revoked" embed.
-- 🔁 Startup enforcement: rebuilds blacklist cache from BLACKLIST_LOG_CH, applying both blacklist adds and revocations.
-- 🧩 All previously provided commands & behavior preserved.
-
-NOTE: Put DISCORD_TOKEN and GUILD_ID in your .env
+- Ticket system with persistent dropdown panel and per-ticket buttons: Claim, Close, Close w/ Reason (+ Close Request with Approve/Decline)
+- Blacklist & unblacklist with log-channel enforcement (adds + revocations) and cache rebuild on startup
+- /link (placeholder) and /unlink (employee-only)
+- Delivery/Incident logging (incident has NO ping), Promotions, Infractions
+- Host Deployment (restricted to ROLE_HOST_DEPLOY_CMD)
+- Customer Service Welcome (manual command -> posts in CHAN_CUSTOMER_SERVICE)
+- All action logs are EMBEDS in LOG_CHAN
+- Ticket transcripts posted as message; fallback to file if too long
+- Persistent aiohttp web server (for Render); binds $PORT
+Put DISCORD_TOKEN and GUILD_ID in your .env
 """
 
 import os, io, json, asyncio
@@ -41,10 +44,11 @@ CHAN_INFRACT         = 1420820006530191511
 CHAN_SUGGESTIONS     = 1421029829096243247
 CHAN_TRANSCRIPTS     = 1420970087376093214
 TICKET_PANEL_CH      = 1420723037015113749
-LOG_CHAN             = 1421124715707367434  # general action log
-BLACKLIST_LOG_CH     = 1421125894168379422  # dedicated blacklist log channel
+LOG_CHAN             = 1421124715707367434  # general action log (embeds)
+BLACKLIST_LOG_CH     = 1421125894168379422  # dedicated blacklist log channel (embeds)
+CHAN_CUSTOMER_SERVICE = 1420784105448280136 # manual welcome goes here
 
-# Ticket categories
+# Ticket categories (separate per type)
 CAT_GS   = 1420967576153882655
 CAT_MC   = 1421019719023984690
 CAT_SHR  = 1421019777807290461
@@ -120,13 +124,22 @@ def has_any_role(member: discord.Member, role_ids) -> bool:
     ids = set(role_ids if isinstance(role_ids, (list, tuple, set)) else [role_ids])
     return any(r.id in ids for r in member.roles)
 
-async def send_log(guild: discord.Guild, text: str, embed: Optional[Embed] = None):
+# --------------------------------------------------------------------------------------
+# Embedded logging
+# --------------------------------------------------------------------------------------
+async def send_log_embed(guild: discord.Guild, title: str, description: str, color: discord.Color = discord.Color.blurple(), fields: Optional[List[Tuple[str,str,bool]]] = None):
     ch = guild.get_channel(LOG_CHAN)
-    if ch and isinstance(ch, (discord.TextChannel, discord.Thread)):
-        try:
-            await ch.send(content=text, embed=embed)
-        except:
-            pass
+    if not ch or not isinstance(ch, (discord.TextChannel, discord.Thread)):
+        return
+    e = Embed(title=title, description=description, color=color)
+    e.timestamp = datetime.now(timezone.utc)
+    if fields:
+        for n,v,inline in fields:
+            e.add_field(name=n, value=v, inline=inline)
+    try:
+        await ch.send(embed=e)
+    except:
+        pass
 
 # --------------------------------------------------------------------------------------
 # Blacklist cache helpers
@@ -147,9 +160,6 @@ def bl_remove_from_cache(uid: int, types: List[str]):
     else:
         bl.pop(str(uid), None)
     save_json(BLACKLIST_FILE, bl)
-
-def bl_clear_cache():
-    save_json(BLACKLIST_FILE, {})
 
 def bl_has(uid: int, ttype: str) -> bool:
     bl = load_json(BLACKLIST_FILE, {})
@@ -191,7 +201,6 @@ async def post_blacklist_log(guild: discord.Guild, user_id: int, types: List[str
         return None
 
 async def find_last_blacklist_message(guild: discord.Guild, user_id: int, match_types: Optional[List[str]] = None, source: Optional[str] = None) -> Optional[discord.Message]:
-    """Find the most recent 'Blacklist Log' embed for user_id (optionally matching types/source)."""
     ch = guild.get_channel(BLACKLIST_LOG_CH)
     if not ch or not isinstance(ch, discord.TextChannel):
         return None
@@ -199,37 +208,27 @@ async def find_last_blacklist_message(guild: discord.Guild, user_id: int, match_
         for emb in msg.embeds:
             if (emb.title or "").strip().lower() != "blacklist log":
                 continue
-            uid = None
-            types_val = None
-            src = None
+            uid = None; types_val = None; src = None
             for f in emb.fields:
                 n = (f.name or "").strip().lower()
                 if n == "user id":
-                    try:
-                        uid = int((f.value or "").strip().replace("`", ""))
-                    except:
-                        uid = None
+                    try: uid = int((f.value or "").strip().replace("`",""))
+                    except: uid = None
                 elif n == "types":
                     types_val = (f.value or "").strip().lower()
                 elif n == "source":
                     src = (f.value or "").strip().lower()
-            if uid != user_id:
-                continue
-            if source and (src or "").lower() != source.lower():
-                continue
+            if uid != user_id: continue
+            if source and (src or "").lower() != source.lower(): continue
             if match_types:
-                # match if logged types include all requested
-                if types_val == "all":
-                    return msg
-                logged = {t.strip() for t in types_val.split(",")}
-                if set(t.lower() for t in match_types).issubset(logged):
-                    return msg
+                if types_val == "all": return msg
+                logged = {t.strip() for t in (types_val or "").split(",")}
+                if set(t.lower() for t in match_types).issubset(logged): return msg
             else:
                 return msg
     return None
 
 async def reply_blacklist_revoked(guild: discord.Guild, target_msg: discord.Message, user_id: int, types: List[str], actor: Optional[discord.Member]):
-    """Reply to an existing blacklist log with a revocation embed."""
     try:
         emb = make_revocation_embed(user_id, types, actor)
         await target_msg.reply(embed=emb, mention_author=False)
@@ -237,16 +236,9 @@ async def reply_blacklist_revoked(guild: discord.Guild, target_msg: discord.Mess
         pass
 
 async def rebuild_blacklists_from_log(guild: discord.Guild):
-    """
-    Builds BLACKLIST_FILE from BLACKLIST_LOG_CH history.
-    - Adds types from "Blacklist Log" embeds.
-    - Removes types from "Blacklist Revoked" embeds (replies or standalone).
-    """
     ch = guild.get_channel(BLACKLIST_LOG_CH)
     if not ch or not isinstance(ch, discord.TextChannel):
         return
-
-    # First pass: collect adds
     adds: Dict[str, set] = {}
     async for msg in ch.history(limit=400, oldest_first=True):
         for emb in msg.embeds:
@@ -256,58 +248,39 @@ async def rebuild_blacklists_from_log(guild: discord.Guild):
                 for f in emb.fields:
                     n = (f.name or "").strip().lower()
                     if n == "user id":
-                        try:
-                            uid = int((f.value or "").strip().replace("`", ""))
-                        except:
-                            uid = None
+                        try: uid = int((f.value or "").strip().replace("`",""))
+                        except: uid = None
                     elif n == "types":
                         types_val = (f.value or "").strip().lower()
-                if uid is None or not types_val:
-                    continue
-                if types_val == "all":
-                    tset = {"gs","mc","shr"}
-                else:
-                    tset = {t.strip() for t in types_val.split(",") if t.strip() in {"gs","mc","shr"}}
-                if not tset:
-                    continue
+                if uid is None or not types_val: continue
+                tset = {"gs","mc","shr"} if types_val == "all" else {t.strip() for t in types_val.split(",") if t.strip() in {"gs","mc","shr"}}
+                if not tset: continue
                 s = adds.get(str(uid), set())
                 s |= tset
                 adds[str(uid)] = s
-
-    # Second pass: collect revocations, subtract from adds
     async for msg in ch.history(limit=400, oldest_first=True):
         for emb in msg.embeds:
-            title = (emb.title or "").strip().lower()
-            if title == "blacklist revoked":
-                uid = None; types_val = None
-                for f in emb.fields:
-                    n = (f.name or "").strip().lower()
-                    if n == "user id":
-                        try:
-                            uid = int((f.value or "").strip().replace("`", ""))
-                        except:
-                            uid = None
-                    elif n == "types":
-                        types_val = (f.value or "").strip().lower()
-                if uid is None or not types_val:
-                    continue
-                if types_val == "all":
-                    tset = {"gs","mc","shr"}
-                else:
-                    tset = {t.strip() for t in types_val.split(",") if t.strip() in {"gs","mc","shr"}}
-                if not tset:
-                    continue
-                if str(uid) in adds:
-                    adds[str(uid)] -= tset
-                    if not adds[str(uid)]:
-                        adds.pop(str(uid), None)
-
-    # Write cache
-    out = {k: sorted(v) for k, v in adds.items()}
+            if (emb.title or "").strip().lower() != "blacklist revoked":
+                continue
+            uid = None; types_val = None
+            for f in emb.fields:
+                n = (f.name or "").strip().lower()
+                if n == "user id":
+                    try: uid = int((f.value or "").strip().replace("`",""))
+                    except: uid = None
+                elif n == "types":
+                    types_val = (f.value or "").strip().lower()
+            if uid is None or not types_val: continue
+            tset = {"gs","mc","shr"} if types_val == "all" else {t.strip() for t in types_val.split(",") if t.strip() in {"gs","mc","shr"}}
+            if not tset: continue
+            if str(uid) in adds:
+                adds[str(uid)] -= tset
+                if not adds[str(uid)]: adds.pop(str(uid), None)
+    out = {k: sorted(v) for k,v in adds.items()}
     save_json(BLACKLIST_FILE, out)
 
 # --------------------------------------------------------------------------------------
-# Ticket helpers
+# Ticket helpers & embeds
 # --------------------------------------------------------------------------------------
 def next_ticket_number(ttype: str) -> int:
     c = load_json(COUNTERS_FILE, {"gs": 1, "mc": 1, "shr": 1})
@@ -318,15 +291,39 @@ def next_ticket_number(ttype: str) -> int:
 
 def ticket_type_meta(ttype: str) -> dict:
     if ttype == "gs":
-        return {"label": "General Support", "ping_role": ROLE_TICKET_GS, "bio": "General Support for any questions.",
-                "visibility_role": None, "category_id": CAT_GS}
+        return {"label": "General Support", "ping_role": ROLE_TICKET_GS, "bio": "General Support for any questions you may have regarding anything DoorDash related. Our Support Team will be with you as soon as they can.", "visibility_role": None, "category_id": CAT_GS}
     if ttype == "mc":
-        return {"label": "Misconduct", "ping_role": ROLE_TICKET_MC, "bio": "Report misconduct.",
-                "visibility_role": None, "category_id": CAT_MC}
+        return {"label": "Misconduct", "ping_role": ROLE_TICKET_MC, "bio": "Misconduct ticket for reporting misconduct or issues regarding your food delivery.", "visibility_role": None, "category_id": CAT_MC}
     if ttype == "shr":
-        return {"label": "Senior High Ranking", "ping_role": ROLE_TICKET_SHR,
-                "bio": "Report staff/high rank/NSFW.", "visibility_role": ROLE_TICKET_SHR, "category_id": CAT_SHR}
+        return {"label": "Senior High Ranking", "ping_role": ROLE_TICKET_SHR, "bio": "Used to report customer support members, high ranking questions, or reporting NSFW.", "visibility_role": ROLE_TICKET_SHR, "category_id": CAT_SHR}
     raise ValueError("Unknown ticket type")
+
+def make_ticket_embed(ttype: str, opener: discord.Member) -> Embed:
+    meta = ticket_type_meta(ttype)
+    e = Embed(title=f"{meta['label']} Ticket", description=meta["bio"], color=discord.Color.red())
+    e.add_field(name="Opened by", value=opener.mention, inline=True)
+    e.set_footer(text="Use the buttons to claim or close this ticket.")
+    return e
+
+# --------------------------------------------------------------------------------------
+# Ticket storage helpers
+# --------------------------------------------------------------------------------------
+def get_ticket(ch_id: int) -> Optional[dict]:
+    tickets = load_json(TICKETS_FILE, [])
+    for t in tickets:
+        if str(ch_id) == t.get("id"):
+            return t
+    return None
+
+def update_ticket(updated: dict):
+    tickets = load_json(TICKETS_FILE, [])
+    for i, t in enumerate(tickets):
+        if t["id"] == updated["id"]:
+            tickets[i] = updated
+            save_json(TICKETS_FILE, tickets)
+            return
+    tickets.append(updated)
+    save_json(TICKETS_FILE, tickets)
 
 # --------------------------------------------------------------------------------------
 # Transcripts (message-first, else file)
@@ -355,19 +352,153 @@ async def send_transcript(channel: discord.TextChannel, ticket: dict, reason: Op
             await trans.send("Transcript too long, sent as file:", file=file)
 
     ticket["status"] = "closed"
-    tickets = load_json(TICKETS_FILE, [])
-    tickets = [t if t["id"] != ticket["id"] else ticket for t in tickets]
-    save_json(TICKETS_FILE, tickets)
+    update_ticket(ticket)
 
-    await send_log(channel.guild, f"📕 Ticket {channel.name} closed by <@{by.id}>. Reason: {reason or 'None'}")
+    await send_log_embed(
+        channel.guild,
+        title="Ticket Closed",
+        description=f"{channel.name} closed by <@{by.id}>",
+        color=discord.Color.dark_grey(),
+        fields=[
+            ("Type/Number", f"{ticket.get('type','?').upper()} #{ticket.get('number','?')}", True),
+            ("Channel ID", f"`{channel.id}`", True),
+            ("Reason", reason or "None", False),
+        ],
+    )
     try:
         await channel.delete()
     except:
         pass
 
 # --------------------------------------------------------------------------------------
-# Ticket dropdown (persistent) and creation
+# Ticket button views
 # --------------------------------------------------------------------------------------
+class TicketActionView(ui.View):
+    def __init__(self, ticket: dict):
+        super().__init__(timeout=None)  # persistent
+        self.ticket = ticket
+
+    @ui.button(label="Claim", style=discord.ButtonStyle.success, custom_id="ticket_claim")
+    async def claim(self, interaction: Interaction, _):
+        meta = ticket_type_meta(self.ticket["type"])
+        if not has_any_role(interaction.user, [meta["ping_role"]]):
+            return await interaction.response.send_message("Only the pinged role can claim this ticket.", ephemeral=True)
+        if self.ticket.get("handler_id"):
+            return await interaction.response.send_message("This ticket is already claimed.", ephemeral=True)
+        self.ticket["handler_id"] = interaction.user.id
+        update_ticket(self.ticket)
+        await interaction.response.send_message(f"Ticket claimed by {interaction.user.mention}.", ephemeral=False)
+        await send_log_embed(interaction.guild, "Ticket Claimed",
+                             f"{interaction.user.mention} claimed {interaction.channel.mention}",
+                             color=discord.Color.green(),
+                             fields=[("Ticket", f"{self.ticket['type'].upper()} #{self.ticket['number']}", True)])
+
+    @ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="ticket_close")
+    async def close_btn(self, interaction: Interaction, _):
+        # NOT ephemeral confirmation
+        await interaction.response.send_message("Are you sure you want to close the ticket?", view=ConfirmCloseView(self.ticket))
+
+    @ui.button(label="Close w/ Reason", style=discord.ButtonStyle.secondary, custom_id="ticket_close_reason")
+    async def close_reason(self, interaction: Interaction, _):
+        await interaction.response.send_modal(ReasonModal(self.ticket))
+
+class ConfirmCloseView(ui.View):
+    def __init__(self, ticket: dict):
+        super().__init__(timeout=180)
+        self.ticket = ticket
+
+    @ui.button(label="Yes, close", style=discord.ButtonStyle.danger, custom_id="close_yes")
+    async def yes(self, interaction: Interaction, _):
+        t = self.ticket
+        meta = ticket_type_meta(t["type"])
+        if interaction.user.id not in {t.get("opener_id"), t.get("handler_id")} and not has_any_role(interaction.user, [meta["ping_role"], ROLE_TICKET_SHR]):
+            return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
+        await interaction.response.defer()
+        await send_transcript(interaction.channel, t, reason=None, by=interaction.user)
+
+    @ui.button(label="No, cancel", style=discord.ButtonStyle.secondary, custom_id="close_no")
+    async def no(self, interaction: Interaction, _):
+        await interaction.response.send_message("Close cancelled.", ephemeral=True)
+        self.stop()
+
+class ReasonModal(ui.Modal, title="Close with Reason"):
+    reason = ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, required=True, max_length=2000)
+    def __init__(self, ticket: dict):
+        super().__init__(timeout=180)
+        self.ticket = ticket
+    async def on_submit(self, interaction: Interaction):
+        t = self.ticket
+        meta = ticket_type_meta(t["type"])
+        if interaction.user.id not in {t.get("opener_id"), t.get("handler_id")} and not has_any_role(interaction.user, [meta["ping_role"], ROLE_TICKET_SHR]):
+            return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
+        await interaction.response.defer()
+        await send_transcript(interaction.channel, t, reason=str(self.reason), by=interaction.user)
+
+class CloseRequestView(ui.View):
+    def __init__(self, ticket: dict):
+        super().__init__(timeout=300)
+        self.ticket = ticket
+
+    @ui.button(label="Approve Close", style=discord.ButtonStyle.success, custom_id="approve_close_req")
+    async def approve(self, interaction: Interaction, _):
+        if interaction.user.id != self.ticket["opener_id"]:
+            return await interaction.response.send_message("Only the ticket opener can approve this.", ephemeral=True)
+        await interaction.response.defer()
+        await send_transcript(interaction.channel, self.ticket, reason="Approved by opener", by=interaction.user)
+
+    @ui.button(label="Decline", style=discord.ButtonStyle.secondary, custom_id="decline_close_req")
+    async def decline(self, interaction: Interaction, _):
+        if interaction.user.id != self.ticket["opener_id"]:
+            return await interaction.response.send_message("Only the ticket opener can respond.", ephemeral=True)
+        await interaction.response.send_message("Close request declined.", ephemeral=True)
+        self.stop()
+
+# --------------------------------------------------------------------------------------
+# Ticket creation & panel
+# --------------------------------------------------------------------------------------
+async def create_ticket_channel(guild: discord.Guild, opener: discord.Member, ttype: Literal["gs", "mc", "shr"]) -> discord.TextChannel:
+    if bl_has(opener.id, ttype):
+        raise app_commands.CheckFailure("User is blacklisted from this ticket type.")
+    meta = ticket_type_meta(ttype)
+    category = guild.get_channel(meta["category_id"])
+    if not isinstance(category, discord.CategoryChannel):
+        raise RuntimeError("Configured category not found.")
+
+    num = next_ticket_number(ttype)
+    name = f"{ttype}-ticket-{num}"
+
+    overw = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        opener: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
+    }
+    if meta["visibility_role"]:
+        rr = guild.get_role(meta["visibility_role"])
+        if rr:
+            overw[rr] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
+    else:
+        rr = guild.get_role(meta["ping_role"])
+        if rr:
+            overw[rr] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
+
+    ch = await guild.create_text_channel(name=name, category=category, overwrites=overw,
+                                         topic=f"{meta['label']} ticket opened by {opener} ({opener.id})")
+
+    ticket = {"id": str(ch.id), "type": ttype, "number": num, "opener_id": opener.id, "handler_id": None, "status": "open"}
+    tickets = load_json(TICKETS_FILE, [])
+    tickets.append(ticket)
+    save_json(TICKETS_FILE, tickets)
+
+    header = f"-# <@&{meta['ping_role']}>"
+    embed = make_ticket_embed(ttype, opener)
+    await ch.send(content=header, embed=embed, view=TicketActionView(ticket),
+                  allowed_mentions=discord.AllowedMentions(roles=True, users=True))
+
+    await send_log_embed(guild, "Ticket Created",
+                         f"{ch.mention} for {opener.mention}",
+                         color=discord.Color.green(),
+                         fields=[("Type/Number", f"{ttype.upper()} #{num}", True), ("Channel ID", f"`{ch.id}`", True)])
+    return ch
+
 class TicketDropdown(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -396,49 +527,15 @@ async def ensure_ticket_panel(guild: discord.Guild):
     async for msg in ch.history(limit=25):
         if msg.author == guild.me and msg.components:
             return
-    embed = Embed(title="DoorDash Support Tickets", description="Use the dropdown below to open a ticket.", color=discord.Color.red())
+    embed = Embed(
+        title="DoorDash Support Tickets",
+        description="Use the dropdown below to open a ticket.\n• **General Support**\n• **Misconduct**\n• **Senior High Ranking**",
+        color=discord.Color.red()
+    )
     await ch.send(embed=embed, view=TicketDropdown())
 
-async def create_ticket_channel(guild: discord.Guild, opener: discord.Member, ttype: Literal["gs", "mc", "shr"]) -> discord.TextChannel:
-    if bl_has(opener.id, ttype):
-        raise app_commands.CheckFailure("User is blacklisted from this ticket type.")
-    meta = ticket_type_meta(ttype)
-    category = guild.get_channel(meta["category_id"])
-    if not isinstance(category, discord.CategoryChannel):
-        raise RuntimeError("Configured category not found.")
-
-    num = next_ticket_number(ttype)
-    name = f"{ttype}-ticket-{num}"
-
-    overw = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        opener: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
-    }
-    if meta["visibility_role"]:
-        rr = guild.get_role(meta["visibility_role"])
-        if rr:
-            overw[rr] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
-    else:
-        rr = guild.get_role(meta["ping_role"])
-        if rr:
-            overw[rr] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
-
-    ch = await guild.create_text_channel(name=name, category=category, overwrites=overw,
-                                         topic=f"{meta['label']} ticket opened by {opener} ({opener.id})")
-
-    ticket = {"id": str(ch.id), "type": ttype, "number": num, "opener_id": opener.id, "status": "open"}
-    tickets = load_json(TICKETS_FILE, [])
-    tickets.append(ticket)
-    save_json(TICKETS_FILE, tickets)
-
-    header = f"-# <@&{meta['ping_role']}>"
-    embed = Embed(title=f"{meta['label']} Ticket", description=meta["bio"], color=discord.Color.red())
-    await ch.send(content=header, embed=embed, allowed_mentions=discord.AllowedMentions(roles=True, users=True))
-    await send_log(guild, f"🎫 Created {ch.mention} for {opener.mention} [{ttype.upper()} #{num}]")
-    return ch
-
 # --------------------------------------------------------------------------------------
-# Commands — blacklist add/remove, tickets, link/unlink, delivery, incident, deployments, HR, sync
+# Commands — blacklist add/remove, tickets, link/unlink, delivery, incident, deployments, HR, sync, disabled cmds, welcome
 # --------------------------------------------------------------------------------------
 # Blacklist add
 @client.tree.command(guild=GUILD_OBJ, name="ticket_blacklist", description="Blacklist a user from a ticket type (staff only)")
@@ -446,19 +543,19 @@ async def create_ticket_channel(guild: discord.Guild, opener: discord.Member, tt
 async def ticket_blacklist(interaction: Interaction, user: discord.Member, ttype: str):
     if not has_any_role(interaction.user, [ROLE_TICKET_SHR]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
-    ttype = ttype.lower()
     if user.id == interaction.user.id:
         return await interaction.response.send_message("You cannot blacklist yourself.", ephemeral=True)
-
+    ttype = ttype.lower()
     if ttype == "all":
         types = ["gs","mc","shr"]
     elif ttype in {"gs","mc","shr"}:
         types = [ttype]
     else:
         return await interaction.response.send_message("Type must be: gs, mc, shr, or all.", ephemeral=True)
-
     bl_add_to_cache(user.id, types)
     await post_blacklist_log(interaction.guild, user.id, types, source="ticket_blacklist", actor=interaction.user)
+    await send_log_embed(interaction.guild, "Blacklist Logged", f"{user.mention} blacklisted", color=discord.Color.dark_red(),
+                         fields=[("Types", _types_field_str(types).upper(), True), ("By", interaction.user.mention, True)])
     await interaction.response.send_message(f"Logged blacklist for {user.mention} ({_types_field_str(types).upper()}).", ephemeral=True)
 
 # Blacklist revoke (ticket)
@@ -474,53 +571,45 @@ async def ticket_unblacklist(interaction: Interaction, user: discord.Member, tty
         types = [ttype]
     else:
         return await interaction.response.send_message("Type must be: gs, mc, shr, or all.", ephemeral=True)
-
-    # Update cache
     bl_remove_from_cache(user.id, types)
-
-    # Find original blacklist message, prefer matching types; if none, any
     msg = await find_last_blacklist_message(interaction.guild, user.id, match_types=types)
-    if not msg:
-        # fallback to any source
-        msg = await find_last_blacklist_message(interaction.guild, user.id)
-
-    # Reply with "Blacklist Revoked"
     if msg:
         await reply_blacklist_revoked(interaction.guild, msg, user.id, types, actor=interaction.user)
     else:
-        # If not found, still post a standalone revocation so rebuild works
         ch = interaction.guild.get_channel(BLACKLIST_LOG_CH)
         if isinstance(ch, discord.TextChannel):
             await ch.send(embed=make_revocation_embed(user.id, types, interaction.user))
-
+    await send_log_embed(interaction.guild, "Blacklist Revoked", f"{user.mention}", color=discord.Color.dark_green(),
+                         fields=[("Types", _types_field_str(types).upper(), True), ("By", interaction.user.mention, True)])
     await interaction.response.send_message(f"Revoked blacklist for {user.mention} ({_types_field_str(types).upper()}).", ephemeral=True)
 
-# Driver blacklist — ONLY logs (no roles granted/removed)
+# Driver blacklist — ONLY logs (no roles change)
 @client.tree.command(guild=GUILD_OBJ, name="driver_blacklist", description="Log a driver blacklist (staff only)")
 async def driver_blacklist(interaction: Interaction, user: discord.Member):
     if not has_any_role(interaction.user, [ROLE_TICKET_SHR]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
-    types = ["gs","mc","shr"]  # treat as all for enforcement
+    types = ["gs","mc","shr"]
     await post_blacklist_log(interaction.guild, user.id, types, source="driver_blacklist", actor=interaction.user)
+    await send_log_embed(interaction.guild, "Driver Blacklist Logged", f"{user.mention}", color=discord.Color.dark_red(),
+                         fields=[("Types", "ALL", True), ("By", interaction.user.mention, True)])
     await interaction.response.send_message(f"Driver blacklist logged for {user.mention}.", ephemeral=True)
 
-# Driver unblacklist — revoke all (reply to last driver blacklist if possible)
+# Driver unblacklist — revoke all
 @client.tree.command(guild=GUILD_OBJ, name="driver_unblacklist", description="Revoke a driver blacklist (staff only)")
 async def driver_unblacklist(interaction: Interaction, user: discord.Member):
     if not has_any_role(interaction.user, [ROLE_TICKET_SHR]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
     types = ["gs","mc","shr"]
     bl_remove_from_cache(user.id, types)
-    # Prefer source=driver_blacklist
     msg = await find_last_blacklist_message(interaction.guild, user.id, match_types=types, source="driver_blacklist")
-    if not msg:
-        msg = await find_last_blacklist_message(interaction.guild, user.id, match_types=types)
     if msg:
         await reply_blacklist_revoked(interaction.guild, msg, user.id, types, actor=interaction.user)
     else:
         ch = interaction.guild.get_channel(BLACKLIST_LOG_CH)
         if isinstance(ch, discord.TextChannel):
             await ch.send(embed=make_revocation_embed(user.id, types, interaction.user))
+    await send_log_embed(interaction.guild, "Driver Blacklist Revoked", f"{user.mention}", color=discord.Color.dark_green(),
+                         fields=[("Types", "ALL", True), ("By", interaction.user.mention, True)])
     await interaction.response.send_message(f"Driver blacklist revoked for {user.mention}.", ephemeral=True)
 
 # Ticket panel (persistent)
@@ -529,10 +618,10 @@ async def ticket_embed(interaction: Interaction):
     if not has_any_role(interaction.user, [ROLE_TICKET_SHR]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
     await ensure_ticket_panel(interaction.guild)
-    await send_log(interaction.guild, f"📌 {interaction.user.mention} ensured ticket panel in <#{TICKET_PANEL_CH}>.")
+    await send_log_embed(interaction.guild, "Ticket Panel Ensured", f"By {interaction.user.mention} in <#{TICKET_PANEL_CH}>")
     return await interaction.response.send_message("Ticket panel ensured.", ephemeral=True)
 
-# Open ticket
+# Open ticket (slash)
 @client.tree.command(guild=GUILD_OBJ, name="ticket_open", description="Open a ticket.")
 @app_commands.choices(ticket_type=[
     app_commands.Choice(name="General Support", value="gs"),
@@ -547,63 +636,26 @@ async def ticket_open(interaction: Interaction, ticket_type: app_commands.Choice
     await interaction.response.send_message(f"Ticket created: {ch.mention}", ephemeral=True)
 
 # Close ticket (confirm message NOT ephemeral)
-class ConfirmCloseView(ui.View):
-    def __init__(self, ticket: dict):
-        super().__init__(timeout=180)
-        self.ticket = ticket
-
-    @ui.button(label="Yes, close", style=discord.ButtonStyle.danger, custom_id="close_yes")
-    async def yes(self, interaction: Interaction, button: ui.Button):
-        t = self.ticket
-        opener_id = t.get("opener_id")
-        if interaction.user.id not in {opener_id} and not has_any_role(interaction.user, [ROLE_TICKET_SHR]):
-            return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
-        await interaction.response.defer()
-        await send_transcript(interaction.channel, t, reason=None, by=interaction.user)
-
-    @ui.button(label="No, cancel", style=discord.ButtonStyle.secondary, custom_id="close_no")
-    async def no(self, interaction: Interaction, button: ui.Button):
-        await interaction.response.send_message("Close cancelled.", ephemeral=True)
-        self.stop()
-
 @client.tree.command(guild=GUILD_OBJ, name="ticket_close", description="Close this ticket (asks for confirmation).")
 async def ticket_close(interaction: Interaction):
-    ticket = next((t for t in load_json(TICKETS_FILE, []) if t["id"] == str(interaction.channel.id) and t.get("status") != "closed"), None)
-    if not ticket:
+    ticket = get_ticket(interaction.channel.id)
+    if not ticket or ticket.get("status") == "closed":
         return await interaction.response.send_message("This is not an open ticket channel.", ephemeral=True)
-    view = ConfirmCloseView(ticket)
-    await interaction.response.send_message("Are you sure you want to close the ticket?", view=view)  # NOT ephemeral
+    await interaction.response.send_message("Are you sure you want to close the ticket?", view=ConfirmCloseView(ticket))
 
 # Close request (handler asks opener)
-class CloseRequestView(ui.View):
-    def __init__(self, ticket: dict):
-        super().__init__(timeout=300)
-        self.ticket = ticket
-
-    @ui.button(label="Approve Close", style=discord.ButtonStyle.success, custom_id="approve_close_req")
-    async def approve(self, interaction: Interaction, button: ui.Button):
-        if interaction.user.id != self.ticket["opener_id"]:
-            return await interaction.response.send_message("Only the ticket opener can approve this.", ephemeral=True)
-        await interaction.response.defer()
-        await send_transcript(interaction.channel, self.ticket, reason="Approved by opener", by=interaction.user)
-
-    @ui.button(label="Decline", style=discord.ButtonStyle.secondary, custom_id="decline_close_req")
-    async def decline(self, interaction: Interaction, button: ui.Button):
-        if interaction.user.id != self.ticket["opener_id"]:
-            return await interaction.response.send_message("Only the ticket opener can respond.", ephemeral=True)
-        await interaction.response.send_message("Close request declined.", ephemeral=True)
-        self.stop()
-
 @client.tree.command(guild=GUILD_OBJ, name="ticket_close_request", description="Handler requests close; opener must approve.")
 async def ticket_close_request(interaction: Interaction):
-    ticket = next((t for t in load_json(TICKETS_FILE, []) if t["id"] == str(interaction.channel.id) and t.get("status") != "closed"), None)
-    if not ticket:
+    ticket = get_ticket(interaction.channel.id)
+    if not ticket or ticket.get("status") == "closed":
         return await interaction.response.send_message("This is not an open ticket channel.", ephemeral=True)
     opener = interaction.guild.get_member(ticket["opener_id"])
     if not opener:
         return await interaction.response.send_message("Opener not found.", ephemeral=True)
-    await interaction.response.send_message(content=f"{opener.mention}, the handler is requesting to close this ticket. Do you approve?",
-                                            view=CloseRequestView(ticket))
+    await interaction.response.send_message(
+        content=f"{opener.mention}, the handler is requesting to close this ticket. Do you approve?",
+        view=CloseRequestView(ticket)
+    )
 
 # /link (placeholder) + /unlink
 @client.tree.command(guild=GUILD_OBJ, name="link", description="Link your forum thread (requires employee role).")
@@ -626,6 +678,7 @@ async def unlink(interaction: Interaction):
     if before == after:
         return await interaction.response.send_message("You have no linked forum thread.", ephemeral=True)
     save_json(LINKS_FILE, links)
+    await send_log_embed(interaction.guild, "Unlinked Forum", f"{interaction.user.mention} removed their link.")
     await interaction.response.send_message("Your forum link has been removed.", ephemeral=True)
 
 # Delivery logging (requires linked)
@@ -672,10 +725,13 @@ async def log_delivery(interaction: Interaction,
         "customer": customer, "method": method, "thread_id": thread_id
     })
     save_json(DELIVERIES_FILE, deliveries)
-    await send_log(interaction.guild, f"📦 Delivery logged by {interaction.user.mention}.")
+
+    await send_log_embed(interaction.guild, "Delivery Logged", f"By {interaction.user.mention}",
+                         color=discord.Color.green(),
+                         fields=[("Pickup → Dropoff", f"{pickup} → {dropoff}", False)])
     await interaction.response.send_message("Delivery logged.", ephemeral=True)
 
-# Incident logging (no pings)
+# Incident logging (NO pings)
 @client.tree.command(guild=GUILD_OBJ, name="log_incident", description="Log an incident (no ping).")
 async def log_incident(interaction: Interaction, location: str, incident_type: str, reason: str):
     if not has_any_role(interaction.user, [ROLE_EMPLOYEE_ALL]):
@@ -686,7 +742,10 @@ async def log_incident(interaction: Interaction, location: str, incident_type: s
     embed.add_field(name="Reason", value=reason, inline=False)
     chan = interaction.guild.get_channel(CHAN_INCIDENT)
     await chan.send(embed=embed)
-    await send_log(interaction.guild, f"🚧 Incident logged by {interaction.user.mention}: {incident_type} at {location}")
+    await send_log_embed(interaction.guild, "Incident Logged",
+                         f"{interaction.user.mention} logged an incident.",
+                         color=discord.Color.red(),
+                         fields=[("Type @ Location", f"{incident_type} @ {location}", False)])
     await interaction.response.send_message("Incident logged.", ephemeral=True)
 
 # Deployment (only ROLE_HOST_DEPLOY_CMD can use)
@@ -694,7 +753,6 @@ async def log_incident(interaction: Interaction, location: str, incident_type: s
 async def host_deployment(interaction: Interaction, reason: str, location: str, votes: str):
     if not has_any_role(interaction.user, [ROLE_HOST_DEPLOY_CMD]):
         return await interaction.response.send_message("No permission.", ephemeral=True)
-
     embed = Embed(title="Deployment Hosted", color=discord.Color.purple())
     embed.set_image(url=DEPLOYMENT_GIF)
     embed.add_field(name="Reason", value=reason, inline=False)
@@ -734,7 +792,10 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
 
     chan = interaction.guild.get_channel(CHAN_DEPLOYMENT)
     await chan.send(embed=embed, view=DeployVoteView())
-    await send_log(interaction.guild, f"🛠️ Deployment hosted by {interaction.user.mention} — {location} | {reason}")
+    await send_log_embed(interaction.guild, "Deployment Hosted",
+                         f"By {interaction.user.mention}",
+                         color=discord.Color.purple(),
+                         fields=[("Location", location, True), ("Reason", reason, True)])
     await interaction.response.send_message("Deployment hosted.", ephemeral=True)
 
 # HR actions
@@ -750,7 +811,10 @@ async def promote(interaction: Interaction, employee: discord.Member, old_rank: 
     embed.add_field(name="Notes", value=notes, inline=False)
     chan = interaction.guild.get_channel(CHAN_PROMOTE)
     await chan.send(content=employee.mention, embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
-    await send_log(interaction.guild, f"⬆️ {interaction.user.mention} promoted {employee.mention} from {old_rank} to {new_rank}")
+    await send_log_embed(interaction.guild, "Promotion",
+                         f"{interaction.user.mention} promoted {employee.mention}",
+                         color=discord.Color.gold(),
+                         fields=[("Old → New", f"{old_rank} → {new_rank}", True)])
     await interaction.response.send_message("Promotion logged.", ephemeral=True)
 
 @client.tree.command(guild=GUILD_OBJ, name="infraction", description="Infract an employee")
@@ -767,7 +831,10 @@ async def infraction(interaction: Interaction, employee: discord.Member, reason:
     embed.add_field(name="Appealable", value=appealable, inline=True)
     chan = interaction.guild.get_channel(CHAN_INFRACT)
     await chan.send(content=employee.mention, embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
-    await send_log(interaction.guild, f"⚠️ {interaction.user.mention} issued **{infraction_type}** to {employee.mention}")
+    await send_log_embed(interaction.guild, "Infraction",
+                         f"{interaction.user.mention} → {employee.mention}",
+                         color=discord.Color.dark_red(),
+                         fields=[("Type", infraction_type, True)])
     await interaction.response.send_message("Infraction logged.", ephemeral=True)
 
 # Disabled (kept in code)
@@ -783,7 +850,7 @@ async def permission_request(interaction: Interaction, permission: str, reason: 
 async def resignation_request(interaction: Interaction, division: str, note: str, ping: str):
     await interaction.response.send_message("This command is currently disabled.", ephemeral=True)
 
-# Customer Service welcome (manual)
+# Customer Service welcome (manual → sends in CHAN_CUSTOMER_SERVICE)
 @client.tree.command(guild=GUILD_OBJ, name="customer_service_welcome", description="Welcome a new Customer Service member (staff only).")
 async def customer_service_welcome(interaction: Interaction, user: discord.Member):
     if not has_any_role(interaction.user, [ROLE_CUST_SERVICE_WELCOMER]):
@@ -796,8 +863,10 @@ async def customer_service_welcome(interaction: Interaction, user: discord.Membe
         ),
         color=discord.Color.teal()
     )
-    await interaction.channel.send(content=user.mention, embed=embed)
-    await send_log(interaction.guild, f"👋 {interaction.user.mention} welcomed {user.mention} to Customer Service.")
+    ch = interaction.guild.get_channel(CHAN_CUSTOMER_SERVICE)
+    if isinstance(ch, (discord.TextChannel, discord.Thread)):
+        await ch.send(content=user.mention, embed=embed)
+    await send_log_embed(interaction.guild, "Customer Service Welcome", f"{interaction.user.mention} welcomed {user.mention}", color=discord.Color.teal())
     await interaction.response.send_message("Welcome sent.", ephemeral=True)
 
 # /sync (staff-only, 5-min cooldown)
@@ -813,7 +882,7 @@ async def sync_cmd(interaction: Interaction):
         return await interaction.response.send_message(f"On cooldown. Try again in ~{remain}s.", ephemeral=True)
     _last_sync[interaction.user.id] = now
     cmds = await client.tree.sync(guild=GUILD_OBJ) if GUILD_OBJ else await client.tree.sync()
-    await send_log(interaction.guild, f"🔄 {interaction.user.mention} synced slash commands ({len(cmds)}).")
+    await send_log_embed(interaction.guild, "Slash Commands Synced", f"{interaction.user.mention} synced ({len(cmds)})")
     await interaction.response.send_message(f"Synced {len(cmds)} commands.", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
@@ -828,15 +897,13 @@ async def on_ready():
         print("Initial sync failed:", e)
     guild = client.get_guild(GUILD_ID)
     if guild:
-        # Rebuild blacklist cache (adds - revocations)
         try:
             await rebuild_blacklists_from_log(guild)
             print("[blacklist] cache rebuilt from log channel (with revocations)")
         except Exception as e:
             print("[blacklist] rebuild failed:", e)
-        # Ensure ticket panel exists/works after restarts
         await ensure_ticket_panel(guild)
-        await send_log(guild, "✅ Bot is online, blacklist cache rebuilt (with revocations), and ticket panel verified.")
+        await send_log_embed(guild, "Bot Online", "Blacklist cache rebuilt; ticket panel verified.", color=discord.Color.green())
 
 # --------------------------------------------------------------------------------------
 # Web server (Render)
