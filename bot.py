@@ -1,4 +1,4 @@
-    """
+ï»¿"""
 DoorDash LARP Bot - FULL (ASCII-safe)
 - Tickets: /ticket_embed, /ticket_open, /ticket_close, /ticket_close_request, /ticket_blacklist, /ticket_unblacklist,
            /ticket_add, /ticket_remove
@@ -494,9 +494,9 @@ async def ticket_embed(interaction: Interaction):
         title="DoorDash Support Tickets",
         description=(
             "Choose a ticket type from the menu below.\n\n"
-            "• General Support — Questions about anything DoorDash related. Our Support Team will assist you shortly.\n"
-            "• Misconduct — Report misconduct or issues regarding your delivery.\n"
-            "• Senior High Ranking — Report customer support members, high ranking questions, or NSFW.\n\n"
+            "â€¢ General Support - Questions about anything DoorDash related. Our Support Team will assist you shortly.\n"
+            "â€¢ Misconduct - Report misconduct or issues regarding your delivery.\n"
+            "â€¢ Senior High Ranking - Report customer support members, high ranking questions, or NSFW.\n\n"
             "After opening a ticket, use the buttons to claim or close."
         ),
         color=discord.Color.red()
@@ -764,7 +764,7 @@ async def log_delivery(interaction: Interaction,
     embed.add_field(name="Customer", value=customer, inline=True)
     embed.add_field(name="Requested Via", value=method, inline=True)
     embed.add_field(name="Proof", value=proof, inline=False)
-    embed.set_footer(text="Logged by {u} • {id}".format(u=str(interaction.user), id=interaction.user.id))
+    embed.set_footer(text="Logged by {u} â€¢ {id}".format(u=str(interaction.user), id=interaction.user.id))
 
     chan = client.get_channel(CHAN_DELIVERY)
     await chan.send(embed=embed)
@@ -1100,3 +1100,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
