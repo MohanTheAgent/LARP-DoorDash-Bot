@@ -1,11 +1,15 @@
 ﻿# -*- coding: utf-8 -*-
 """
-DoorDash LA:RP Bot — FULL (promotions/infractions embed re-style)
-- Promotions & Infractions use your GIF and divider, include driver chat / ticket support links
-- /infraction restricted to role 1421386330335608873
-- /promote restricted to role 1420836510185554074
-- All button styles use discord.py 2.x lowercase enums
-- Everything else left as-is from prior version
+DoorDash LA:RP Bot — FULL
+(Updated: promo/infraction embeds + strict role checks)
+
+Changes in this version:
+- /promote restricted to role 1420836510185554074 via app_commands.checks.has_role + handler
+- /infraction restricted to role 1421386330335608873 via checks + handler
+- Promotion embed: separate fields Old Rank / New Rank, red border, DoorDash emoji in title
+- Infraction embed: advisory text for disputes, DoorDash emoji in title
+- Keeps GIF banners, divider, and helpful links
+- Other commands unchanged from previous working version
 """
 
 import os
@@ -17,6 +21,7 @@ from typing import Optional, Literal, Dict, Any, List, Tuple
 import discord
 from discord import app_commands, Interaction, Embed, ui
 from discord.ext import commands
+from discord.app_commands import checks
 from aiohttp import web
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
@@ -29,7 +34,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 # --------------------------------------------------------------------------------------
-# Hardcoded IDs (from your specs) — unchanged unless noted
+# Hardcoded IDs (from your specs)
 # --------------------------------------------------------------------------------------
 # Channels
 CHAN_INCIDENT = 1420773317949784124
@@ -40,37 +45,36 @@ CHAN_PERMISSION = 1420811205114859732
 CHAN_DEPLOYMENT = 1420778159879753800
 CHAN_PROMOTE = 1420819381788741653
 CHAN_INFRACT = 1420820006530191511
-CHAN_CUSTOMER_SERVICE = 1420784105448280136   # welcome when they gain role (kept if you still use elsewhere)
-TICKET_CATEGORY_ID = 1420967576153882655      # default category (GS)
-TICKET_CATEGORY_MC = 1421019719023984690      # MC category
-TICKET_CATEGORY_SHR = 1421019777807290461     # SHR category
-TICKET_PANEL_CHANNEL_ID = 1420723037015113749  # panel must post here
-CHAN_TRANSCRIPTS = 1420970087376093214         # transcripts post here
+CHAN_CUSTOMER_SERVICE = 1420784105448280136
+TICKET_CATEGORY_ID = 1420967576153882655      # GS
+TICKET_CATEGORY_MC = 1421019719023984690      # MC
+TICKET_CATEGORY_SHR = 1421019777807290461     # SHR
+TICKET_PANEL_CHANNEL_ID = 1420723037015113749
+CHAN_TRANSCRIPTS = 1420970087376093214
 
-# Log channels
+# Logs
 CHAN_AUDIT_LOG = 1421124715707367434
 CHAN_TICKET_BLACKLIST_LOG = 1421125894168379422
 
 # Roles
-# Unified employee permissions for core cmds (per your earlier request)
 _EMPLOYEE_ROLE_ALL = 1420838579780714586
 ROLE_LINK = _EMPLOYEE_ROLE_ALL
 ROLE_DELIVERY = _EMPLOYEE_ROLE_ALL
 ROLE_RESIGNATION = _EMPLOYEE_ROLE_ALL
 ROLE_PERMISSION = _EMPLOYEE_ROLE_ALL
-ROLE_DEPLOYMENT_CAN_USE = 1420777206770171985  # per your later change: only this role can host deployments
+ROLE_DEPLOYMENT_CAN_USE = 1420777206770171985
 ROLE_DEPLOYMENT_PING = _EMPLOYEE_ROLE_ALL
-ROLE_INCIDENT_ANY = _EMPLOYEE_ROLE_ALL  # incidents: no ping now (as requested later)
+ROLE_INCIDENT_ANY = _EMPLOYEE_ROLE_ALL
 
 # Ticket roles
-ROLE_CUSTOMER_SERVICE = 1420721072197861446  # for GS tickets
+ROLE_CUSTOMER_SERVICE = 1420721072197861446  # GS handler role
 ROLE_TICKET_GS  = 1420721072197861446
 ROLE_TICKET_MC  = 1420836510185554074
-ROLE_TICKET_SHR = 1420721073170677783  # senior/high-ranking staff
+ROLE_TICKET_SHR = 1420721073170677783
 
-# Promotions / Infractions permissions (UPDATED)
+# Promotions / Infractions strict roles (UPDATED)
 ROLE_PROMOTE = 1420836510185554074
-ROLE_INFRACT = 1421386330335608873  # NEW restriction
+ROLE_INFRACT = 1421386330335608873
 
 # Staff for /sync cooldown
 STAFF_ROLE_ID = ROLE_TICKET_SHR
@@ -79,6 +83,7 @@ STAFF_ROLE_ID = ROLE_TICKET_SHR
 DEPLOYMENT_GIF = "https://cdn.discordapp.com/attachments/1420749680538816553/1420834953335275710/togif.gif"
 BRAND_GIF = "https://cdn.discordapp.com/attachments/1371481729310785687/1421444708323950673/attachment.gif"
 DIVIDER = "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
+DD_EMOJI = "<:DoorDash:1420463324713320469>"
 LINK_DRIVER_CHAT = "https://discord.com/channels/1420461249757577329/1420803252093583471"
 LINK_TICKET_SUPPORT = "https://discord.com/channels/1420461249757577329/1420723037015113749"
 
@@ -151,7 +156,7 @@ def has_any_role(member: discord.Member, role_ids) -> bool:
     return any(r.id in ids for r in member.roles)
 
 def incident_ping_role_id():
-    # incidents no longer ping anyone — return None to skip
+    # incidents no longer ping anyone
     return None
 
 def ticket_type_meta(ttype: str) -> Dict[str, Any]:
@@ -351,7 +356,19 @@ class TicketActionView(ui.View):
             return await interaction.response.send_message("This ticket is already claimed.", ephemeral=True)
         self.ticket["handler_id"] = interaction.user.id
         update_ticket(self.ticket)
+        # Notify opener
+        opener = interaction.guild.get_member(self.ticket["opener_id"])
+        if opener:
+            try:
+                await interaction.channel.send(f"{opener.mention} — your ticket will be handled by {interaction.user.mention}.")
+            except Exception:
+                pass
         await interaction.response.send_message(f"Ticket claimed by {interaction.user.mention}.", ephemeral=False)
+        # Remove the claim button
+        self.clear_items()
+        # Re-add only the close buttons
+        self.add_item(ui.Button(label="Close", style=discord.ButtonStyle.danger, custom_id="ticket_close"))
+        self.add_item(ui.Button(label="Close w/ Reason", style=discord.ButtonStyle.secondary, custom_id="ticket_close_reason"))
 
     @ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="ticket_close")
     async def close_btn(self, interaction: Interaction, button: ui.Button):
@@ -359,7 +376,6 @@ class TicketActionView(ui.View):
         role_needed = ticket_role_for_claim(t["type"])
         if interaction.user.id not in {t["opener_id"], t.get("handler_id")} and not has_any_role(interaction.user, [role_needed]):
             return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
-        # NOT ephemeral (per your request)
         view = ConfirmCloseView(t["opener_id"], t.get("handler_id"), t["id"])
         await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=False)
 
@@ -459,7 +475,7 @@ async def create_ticket_channel(
     return channel
 
 # --------------------------------------------------------------------------------------
-# Ticket commands (panel + open/close/close_request/blacklist)
+# Ticket commands
 # --------------------------------------------------------------------------------------
 @client.tree.command(guild=GUILD_OBJ, name="ticket_embed", description="Post the ticket dropdown panel (staff only).")
 async def ticket_embed(interaction: Interaction):
@@ -528,7 +544,6 @@ async def ticket_close(interaction: Interaction):
     needed_role = ticket_role_for_claim(t["type"])
     if interaction.user.id not in {t["opener_id"], t.get("handler_id")} and not has_any_role(interaction.user, [needed_role]):
         return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
-    # Not ephemeral
     view = ConfirmCloseView(t["opener_id"], t.get("handler_id"), t["id"])
     await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=False)
 
@@ -569,7 +584,6 @@ async def ticket_blacklist(interaction: Interaction, user: discord.Member, actio
     if action.value == "add":
         blacklist_add(user.id, tlist)
         audit("blacklist_add", {"by": interaction.user.id, "user": user.id, "types": tlist})
-        # Log to blacklist channel (embed)
         await send_embed_log(
             interaction.guild,
             "Ticket Blacklist Added",
@@ -599,7 +613,7 @@ async def ticket_blacklist(interaction: Interaction, user: discord.Member, actio
         return await interaction.response.send_message(f"Removed blacklist for {user.mention} on: {', '.join(tlist)}.", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
-# /link — auto-find (or confirm) user's forum thread in channel 1420780863632965763
+# /link — auto-find user's forum thread in configured forum
 # --------------------------------------------------------------------------------------
 async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optional[discord.Thread]:
     forum = guild.get_channel(CHAN_FORUM)
@@ -652,8 +666,7 @@ async def link(interaction: Interaction):
     await interaction.followup.send(f"Linked to your forum thread: **{thread.name}** (`{thread.id}`)", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
-# Delivery / Incident / Resignation / Permission / Deployment (unchanged behavior,
-# except: incidents no ping; deployments restricted role; embeds preserved)
+# Delivery / Incident / Resignation / Permission / Deployment
 # --------------------------------------------------------------------------------------
 @client.tree.command(guild=GUILD_OBJ, name="log_delivery", description="Log a delivery (requires /link first)")
 async def log_delivery(interaction: Interaction,
@@ -711,9 +724,7 @@ async def log_incident(interaction: Interaction, location: str, incident_type: s
     embed.add_field(name="Type", value=incident_type, inline=False)
     embed.add_field(name="Reason", value=reason, inline=False)
     chan = client.get_channel(CHAN_INCIDENT)
-
-    # No ping (per your request)
-    await chan.send(embed=embed)
+    await chan.send(embed=embed)  # no ping
     audit("incident_log", {"by": interaction.user.id, "loc": location})
     await interaction.response.send_message("Incident logged.", ephemeral=True)
 
@@ -775,55 +786,84 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
     await interaction.response.send_message("Deployment hosted.", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
-# Promotions / Infractions (UPDATED styling + permissions)
+# Promotions / Infractions (UPDATED: strict checks + embed style)
 # --------------------------------------------------------------------------------------
 @client.tree.command(guild=GUILD_OBJ, name="promote", description="Promote an employee")
+@checks.has_role(ROLE_PROMOTE)
 async def promote(interaction: Interaction, employee: discord.Member, old_rank: str, new_rank: str, reason: str, notes: str):
-    if not has_any_role(interaction.user, [ROLE_PROMOTE]):
-        return await interaction.response.send_message("No permission.", ephemeral=True)
-
+    # Embed content
     desc = (
         f"{DIVIDER}\n"
-        f"**Promotion Notice**\n"
+        f"**Promotion Notice** {DD_EMOJI}\n"
         f"{DIVIDER}\n"
-        f"**Employee:** {employee.mention}\n"
-        f"**From:** `{old_rank}`  →  **To:** `{new_rank}`\n"
-        f"**Reason:** {reason}\n"
-        f"**Notes:** {notes}\n\n"
         f"[Driver Chat]({LINK_DRIVER_CHAT}) • [Ticket Support]({LINK_TICKET_SUPPORT})"
     )
-
-    embed = Embed(title="🎉 Promotion", description=desc, color=discord.Color.gold(), timestamp=datetime.now(timezone.utc))
+    embed = Embed(
+        title=f"🎉 Promotion {DD_EMOJI}",
+        description=desc,
+        color=discord.Color.red(),
+        timestamp=datetime.now(timezone.utc)
+    )
     embed.set_image(url=BRAND_GIF)
+    embed.add_field(name="Employee", value=employee.mention, inline=False)
+    embed.add_field(name="Old Rank", value=f"`{old_rank}`", inline=True)
+    embed.add_field(name="New Rank", value=f"`{new_rank}`", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Notes", value=notes, inline=False)
+
     chan = client.get_channel(CHAN_PROMOTE)
     await chan.send(content=employee.mention, embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
     audit("promote", {"by": interaction.user.id, "emp": employee.id, "new": new_rank})
     await interaction.response.send_message("Promotion logged.", ephemeral=True)
 
-@client.tree.command(guild=GUILD_OBJ, name="infraction", description="Infract an employee")
-async def infraction(interaction: Interaction, employee: discord.Member, reason: str, infraction_type: str, proof: str, notes: str, appealable: str):
-    if not has_any_role(interaction.user, [ROLE_INFRACT]):
-        return await interaction.response.send_message("No permission.", ephemeral=True)
+@promote.error
+async def promote_error(interaction: Interaction, error):
+    if isinstance(error, app_commands.CheckFailure):
+        try:
+            await interaction.response.send_message("You do not have permission to use /promote.", ephemeral=True)
+        except discord.InteractionResponded:
+            await interaction.followup.send("You do not have permission to use /promote.", ephemeral=True)
 
+@client.tree.command(guild=GUILD_OBJ, name="infraction", description="Infract an employee")
+@checks.has_role(ROLE_INFRACT)
+async def infraction(interaction: Interaction, employee: discord.Member, reason: str, infraction_type: str, proof: str, notes: str, appealable: str):
+    advisory = (
+        f"If you believe this infraction is **false** or **in error**, please ping the issuing staff member in "
+        f"[Driver Chat]({LINK_DRIVER_CHAT}) or open a ticket in [Ticket Support]({LINK_TICKET_SUPPORT})."
+    )
     desc = (
         f"{DIVIDER}\n"
-        f"**Infraction Issued**\n"
+        f"**Infraction Issued** {DD_EMOJI}\n"
         f"{DIVIDER}\n"
-        f"**Employee:** {employee.mention}\n"
-        f"**Type:** `{infraction_type}`\n"
-        f"**Reason:** {reason}\n"
-        f"**Proof:** {proof}\n"
-        f"**Notes:** {notes}\n"
-        f"**Appealable:** `{appealable}`\n\n"
-        f"[Driver Chat]({LINK_DRIVER_CHAT}) • [Ticket Support]({LINK_TICKET_SUPPORT})"
+        f"{advisory}"
     )
 
-    embed = Embed(title="⚠️ Infraction", description=desc, color=discord.Color.dark_red(), timestamp=datetime.now(timezone.utc))
+    embed = Embed(
+        title=f"⚠️ Infraction {DD_EMOJI}",
+        description=desc,
+        color=discord.Color.dark_red(),
+        timestamp=datetime.now(timezone.utc)
+    )
     embed.set_image(url=BRAND_GIF)
+    embed.add_field(name="Employee", value=employee.mention, inline=False)
+    embed.add_field(name="Type", value=f"`{infraction_type}`", inline=True)
+    embed.add_field(name="Appealable", value=f"`{appealable}`", inline=True)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Proof", value=proof, inline=False)
+    embed.add_field(name="Notes", value=notes, inline=False)
+
     chan = client.get_channel(CHAN_INFRACT)
     await chan.send(content=employee.mention, embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
     audit("infraction", {"by": interaction.user.id, "emp": employee.id, "type": infraction_type})
     await interaction.response.send_message("Infraction logged.", ephemeral=True)
+
+@infraction.error
+async def infraction_error(interaction: Interaction, error):
+    if isinstance(error, app_commands.CheckFailure):
+        try:
+            await interaction.response.send_message("You do not have permission to use /infraction.", ephemeral=True)
+        except discord.InteractionResponded:
+            await interaction.followup.send("You do not have permission to use /infraction.", ephemeral=True)
 
 # --------------------------------------------------------------------------------------
 # /sync (staff-only, 5 minute cooldown)
