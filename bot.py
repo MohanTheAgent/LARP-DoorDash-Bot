@@ -6,8 +6,8 @@ DoorDash LA:RP Bot — FULL
 Changes in this version:
 - /promote restricted to role 1420836510185554074 via app_commands.checks.has_role + handler
 - /infraction restricted to role 1421386330335608873 via checks + handler
-- Promotion embed: separate fields Old Rank / New Rank, red border, DoorDash emoji in title
-- Infraction embed: advisory text for disputes, DoorDash emoji in title
+- Promotion embed: title "DoorDash Promotion", red border, Old Rank/New Rank fields, DoorDash emoji as top-right thumbnail
+- Infraction embed: title "DoorDash Infraction", advisory text for disputes, DoorDash emoji as top-right thumbnail
 - Keeps GIF banners, divider, and helpful links
 - Other commands unchanged from previous working version
 """
@@ -83,7 +83,8 @@ STAFF_ROLE_ID = ROLE_TICKET_SHR
 DEPLOYMENT_GIF = "https://cdn.discordapp.com/attachments/1420749680538816553/1420834953335275710/togif.gif"
 BRAND_GIF = "https://cdn.discordapp.com/attachments/1371481729310785687/1421444708323950673/attachment.gif"
 DIVIDER = "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
-DD_EMOJI = "<:DoorDash:1420463324713320469>"
+# DoorDash custom emoji ID -> use CDN link as top-right thumbnail
+EMOJI_URL = "https://cdn.discordapp.com/emojis/1420463324713320469.png?size=128&quality=lossless"
 LINK_DRIVER_CHAT = "https://discord.com/channels/1420461249757577329/1420803252093583471"
 LINK_TICKET_SUPPORT = "https://discord.com/channels/1420461249757577329/1420723037015113749"
 
@@ -377,6 +378,7 @@ class TicketActionView(ui.View):
         if interaction.user.id not in {t["opener_id"], t.get("handler_id")} and not has_any_role(interaction.user, [role_needed]):
             return await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
         view = ConfirmCloseView(t["opener_id"], t.get("handler_id"), t["id"])
+        # Not ephemeral (you asked to make the confirmation public)
         await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=False)
 
     @ui.button(label="Close w/ Reason", style=discord.ButtonStyle.secondary, custom_id="ticket_close_reason")
@@ -630,12 +632,12 @@ async def _find_user_forum_thread(guild: discord.Guild, user_id: int) -> Optiona
         pass
 
     try:
-        async for th, _ in forum.archived_threads(limit=100):
+        async for th in forum.archived_threads(limit=100):
             if getattr(th, "owner_id", None) == user_id:
                 candidates.append(th)
     except Exception:
         try:
-            async for th, _ in forum.public_archived_threads(limit=100):
+            async for th in forum.public_archived_threads(limit=100):
                 if getattr(th, "owner_id", None) == user_id:
                     candidates.append(th)
         except Exception:
@@ -791,19 +793,18 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
 @client.tree.command(guild=GUILD_OBJ, name="promote", description="Promote an employee")
 @checks.has_role(ROLE_PROMOTE)
 async def promote(interaction: Interaction, employee: discord.Member, old_rank: str, new_rank: str, reason: str, notes: str):
-    # Embed content
+    # Embed content (no duplicate wording; emoji in thumbnail)
     desc = (
-        f"{DIVIDER}\n"
-        f"**Promotion Notice** {DD_EMOJI}\n"
         f"{DIVIDER}\n"
         f"[Driver Chat]({LINK_DRIVER_CHAT}) • [Ticket Support]({LINK_TICKET_SUPPORT})"
     )
     embed = Embed(
-        title=f"🎉 Promotion {DD_EMOJI}",
+        title="DoorDash Promotion",
         description=desc,
         color=discord.Color.red(),
         timestamp=datetime.now(timezone.utc)
     )
+    embed.set_thumbnail(url=EMOJI_URL)  # emoji at top-right
     embed.set_image(url=BRAND_GIF)
     embed.add_field(name="Employee", value=employee.mention, inline=False)
     embed.add_field(name="Old Rank", value=f"`{old_rank}`", inline=True)
@@ -827,23 +828,20 @@ async def promote_error(interaction: Interaction, error):
 @client.tree.command(guild=GUILD_OBJ, name="infraction", description="Infract an employee")
 @checks.has_role(ROLE_INFRACT)
 async def infraction(interaction: Interaction, employee: discord.Member, reason: str, infraction_type: str, proof: str, notes: str, appealable: str):
+    # Mandatory advisory line exactly as requested, with links
     advisory = (
-        f"If you believe this infraction is **false** or **in error**, please ping the issuing staff member in "
+        "If you think your infraction is **false**, ping the **primary infraction issuer** in "
         f"[Driver Chat]({LINK_DRIVER_CHAT}) or open a ticket in [Ticket Support]({LINK_TICKET_SUPPORT})."
     )
-    desc = (
-        f"{DIVIDER}\n"
-        f"**Infraction Issued** {DD_EMOJI}\n"
-        f"{DIVIDER}\n"
-        f"{advisory}"
-    )
+    desc = f"{DIVIDER}\n{advisory}"
 
     embed = Embed(
-        title=f"⚠️ Infraction {DD_EMOJI}",
+        title="DoorDash Infraction",
         description=desc,
         color=discord.Color.dark_red(),
         timestamp=datetime.now(timezone.utc)
     )
+    embed.set_thumbnail(url=EMOJI_URL)  # emoji at top-right
     embed.set_image(url=BRAND_GIF)
     embed.add_field(name="Employee", value=employee.mention, inline=False)
     embed.add_field(name="Type", value=f"`{infraction_type}`", inline=True)
