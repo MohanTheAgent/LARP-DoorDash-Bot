@@ -315,7 +315,7 @@ class ConfirmCloseView(ui.View):
         self.handler_id = handler_id
         self.ticket_id = ticket_id
 
-    @ui.button(label="Yes, close", style=discord.ButtonStyle.DANGER, custom_id="close_yes")
+    @ui.button(label="Yes, close", style=discord.ButtonStyle.danger, custom_id="close_yes")
     async def yes(self, interaction: Interaction, button: ui.Button):
         t = get_ticket_by_channel_id(interaction.channel.id)
         if not t:
@@ -330,7 +330,7 @@ class ConfirmCloseView(ui.View):
         await interaction.response.defer()
         await send_transcript_and_delete(interaction.channel, t, reason=None, by=interaction.user)
 
-    @ui.button(label="No, cancel", style=discord.ButtonStyle.SECONDARY, custom_id="close_no")
+    @ui.button(label="No, cancel", style=discord.ButtonStyle.secondary, custom_id="close_no")
     async def no(self, interaction: Interaction, button: ui.Button):
         await interaction.response.send_message("Close cancelled.", ephemeral=True)
         self.stop()
@@ -362,7 +362,7 @@ class TicketActionView(ui.View):
                 if isinstance(child, ui.Button) and child.custom_id == "ticket_claim":
                     self.remove_item(child)
 
-    @ui.button(label="Claim", style=discord.ButtonStyle.SUCCESS, custom_id="ticket_claim")
+    @ui.button(label="Claim", style=discord.ButtonStyle.success, custom_id="ticket_claim")
     async def claim(self, interaction: Interaction, button: ui.Button):
         role_needed = ticket_role_for_claim(self.ticket["type"])
         if not has_any_role(interaction.user, [role_needed]):
@@ -382,7 +382,7 @@ class TicketActionView(ui.View):
 
         await interaction.response.send_message("Ticket claimed.", ephemeral=True)
 
-    @ui.button(label="Close", style=discord.ButtonStyle.DANGER, custom_id="ticket_close")
+    @ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="ticket_close")
     async def close_btn(self, interaction: Interaction, button: ui.Button):
         t = get_ticket_by_channel_id(interaction.channel.id)
         if not t or t.get("status") == "closed":
@@ -397,7 +397,7 @@ class TicketActionView(ui.View):
         view = ConfirmCloseView(t["opener_id"], t.get("handler_id"), t["id"])
         await interaction.response.send_message("Are you sure you want to close the ticket?", view=view, ephemeral=False)
 
-    @ui.button(label="Close w/ Reason", style=discord.ButtonStyle.SECONDARY, custom_id="ticket_close_reason")
+    @ui.button(label="Close w/ Reason", style=discord.ButtonStyle.secondary, custom_id="ticket_close_reason")
     async def close_reason(self, interaction: Interaction, button: ui.Button):
         t = get_ticket_by_channel_id(interaction.channel.id)
         if not t or t.get("status") == "closed":
@@ -574,7 +574,7 @@ async def ticket_close_request(interaction: Interaction):
     view = ui.View(timeout=300)
 
     class _Approve(ui.Button):
-        def __init__(self): super().__init__(label="Approve Close", style=discord.ButtonStyle.SUCCESS)
+        def __init__(self): super().__init__(label="Approve Close", style=discord.ButtonStyle.success)
         async def callback(self, inter: Interaction):
             if inter.user.id != t["opener_id"]:
                 return await inter.response.send_message("Only the ticket opener can approve this.", ephemeral=True)
@@ -582,7 +582,7 @@ async def ticket_close_request(interaction: Interaction):
             await send_transcript_and_delete(inter.channel, t, reason="Approved by opener", by=inter.user)
 
     class _Decline(ui.Button):
-        def __init__(self): super().__init__(label="Decline", style=discord.ButtonStyle.SECONDARY)
+        def __init__(self): super().__init__(label="Decline", style=discord.ButtonStyle.secondary)
         async def callback(self, inter: Interaction):
             if inter.user.id != t["opener_id"]:
                 return await inter.response.send_message("Only the ticket opener can respond.", ephemeral=True)
@@ -824,7 +824,7 @@ async def delivery_request(interaction: Interaction,
             super().__init__(timeout=None)
             self.claimed_by: Optional[int] = None
 
-        @ui.button(label="Claim", style=discord.ButtonStyle.SUCCESS, custom_id="drv_claim")
+        @ui.button(label="Claim", style=discord.ButtonStyle.success, custom_id="drv_claim")
         async def claim(self, inter: Interaction, b: ui.Button):
             if not has_any_role(inter.user, [ROLE_DELIVERY_REQUEST_PING]):
                 return await inter.response.send_message("Only delivery team can claim.", ephemeral=True)
@@ -840,7 +840,7 @@ async def delivery_request(interaction: Interaction,
             await inter.message.edit(embed=embed, view=self)
             await inter.response.send_message("Claimed.", ephemeral=True)
 
-        @ui.button(label="End Delivery", style=discord.ButtonStyle.DANGER, custom_id="drv_end")
+        @ui.button(label="End Delivery", style=discord.ButtonStyle.danger, custom_id="drv_end")
         async def end(self, inter: Interaction, b: ui.Button):
             if not has_any_role(inter.user, [ROLE_DELIVERY_REQUEST_PING]):
                 return await inter.response.send_message("Only delivery team can end.", ephemeral=True)
@@ -995,7 +995,7 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
             self.upvoters = set()
             self.downvoters = set()
 
-        @ui.button(label="Upvote", style=discord.ButtonStyle.SUCCESS, custom_id="dep_up")
+        @ui.button(label="Upvote", style=discord.ButtonStyle.success, custom_id="dep_up")
         async def up(self, inter: Interaction, b: ui.Button):
             if not has_any_role(inter.user, [ROLE_DEPLOYMENT_PING]):
                 return await inter.response.send_message("Only employees can vote.", ephemeral=True)
@@ -1003,7 +1003,7 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
             self.upvoters.add(inter.user.id)
             await inter.response.send_message("Upvoted.", ephemeral=True)
 
-        @ui.button(label="Downvote", style=discord.ButtonStyle.DANGER, custom_id="dep_down")
+        @ui.button(label="Downvote", style=discord.ButtonStyle.danger, custom_id="dep_down")
         async def down(self, inter: Interaction, b: ui.Button):
             if not has_any_role(inter.user, [ROLE_DEPLOYMENT_PING]):
                 return await inter.response.send_message("Only employees can vote.", ephemeral=True)
@@ -1011,7 +1011,7 @@ async def host_deployment(interaction: Interaction, reason: str, location: str, 
             self.downvoters.add(inter.user.id)
             await inter.response.send_message("Downvoted.", ephemeral=True)
 
-        @ui.button(label="List Voters", style=discord.ButtonStyle.SECONDARY, custom_id="dep_list")
+        @ui.button(label="List Voters", style=discord.ButtonStyle.secondary, custom_id="dep_list")
         async def lst(self, inter: Interaction, b: ui.Button):
             if not has_any_role(inter.user, [ROLE_DEPLOYMENT_PING]):
                 return await inter.response.send_message("Only employees can view.", ephemeral=True)
@@ -1100,4 +1100,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
